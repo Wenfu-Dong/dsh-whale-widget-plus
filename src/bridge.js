@@ -10577,6 +10577,11 @@ async function main(options = {}) {
   const MODEL_TARGET_FILE = path.join(SHARED_DSH_HOME, 'surfcore', 'config.json');
   let modelTargetCache = { mtimeMs: -1, value: undefined };
   const modelAppliedSessions = new Map(); // sessionId -> { epoch, signature, manual, manualSignature }
+  // 当前实例确认不存在的 provider（配置里选了桌面版渠道包、但换到没装它的实例）。
+  // 记住 10 分钟，期间直接换可用模型，不再每条消息都撞一次 no adapter。
+  const missingProviders = new Map(); // provider -> 到期时间戳
+  // agent 出错提示的节流表：错误只发给主人私聊，且同一条错误 6 小时内只发一次。
+  const agentErrorNoticeAt = new Map(); // `${key}|${message}` -> 时间戳
 
   /** 读取设置页保存的全局模型；没有 model 字段时回落到桥接配置（旧行为）。 */
   function targetModelSelection() {
@@ -10664,7 +10669,7 @@ async function main(options = {}) {
   // 本地映射已失效，调用方必须退役重建，否则每条消息都会对着一个不存在的会话重试。
   async function ensureChatModel(sessionId) {
     const target = targetModelSelection();
-    const signature = target ? `${target.provider}/${target.model}` : '';
+    let signature = target ? `${target.provider}/${target.model}` : '';
     const known = modelAppliedSessions.get(sessionId);
     if (!target) {
       // 「跟随 DSH 默认」：不干预——但会话里记着的 provider 若当前实例压根没有
@@ -10696,6 +10701,23 @@ async function main(options = {}) {
       modelAppliedSessions.set(sessionId, { epoch: modelSelectionEpoch, signature: '', manual: false });
       return 'applied';
     }
+    // 配置里的 provider 在当前实例不存在（例如桌面版的渠道包 "trae" 在 web 实例没装）：
+    // 以前会硬切过去 → DSH 每个回合都报 no adapter registered，错误还被转发到 QQ。
+    // 这里先按当前实例的模型目录换同名/首个可用模型，并记住这个 provider 10 分钟内不可用。
+    let effective = target;
+    const catalog = await availableModelCatalog();
+    const groups = Array.isArray(catalog?.groups) ? catalog.groups : null;
+    if (groups && !groups.some((group) => String(group?.id ?? '') === String(target.provider))) {
+      const fallback = pickSurvivingModel(catalog, target.model);
+      if (fallback) {
+        effective = fallback;
+        signature = `healed-target:${target.provider}/${target.model}`;
+        if (!missingProviders.has(target.provider)) {
+          missingProviders.set(target.provider, Date.now() + 10 * 60 * 1000);
+          log(`配置的 provider ${target.provider} 在当前实例不存在，QQ 会话改用 ${fallback.provider}/${fallback.model}`);
+        }
+      }
+    }
     if (known && known.epoch === modelSelectionEpoch && known.signature === signature) {
       // 已经应用过桥接目标，但会话当前模型不是它 —— 只可能是用户在窗口里手动切过了。
       const current = sessionModels.get(sessionId);
@@ -10712,7 +10734,7 @@ async function main(options = {}) {
     let lastError = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
-        const result = unwrap(await api.sessions.selectModel({ sessionId, provider: target.provider, model: target.model, reasoningEffort: effort }), 'session.selectModel');
+        const result = unwrap(await api.sessions.selectModel({ sessionId, provider: effective.provider, model: effective.model, reasoningEffort: effort }), 'session.selectModel');
         modelAppliedSessions.set(sessionId, { epoch: modelSelectionEpoch, signature, manual: false });
         log(`已设置会话模型 ${sessionId} -> ${result.selected.provider}/${result.selected.model} (${result.selected.reasoningEffort ?? '默认'})`);
         return 'applied';
@@ -10722,7 +10744,7 @@ async function main(options = {}) {
         // 明确报错时就退一步，只切模型、不指定 effort，别让整次 selectModel 失败。
         if (/effort|reasoning/i.test(String(error?.message ?? ''))) {
           try {
-            const result = unwrap(await api.sessions.selectModel({ sessionId, provider: target.provider, model: target.model }), 'session.selectModel');
+            const result = unwrap(await api.sessions.selectModel({ sessionId, provider: effective.provider, model: effective.model }), 'session.selectModel');
             modelAppliedSessions.set(sessionId, { epoch: modelSelectionEpoch, signature, manual: false });
             log(`已设置会话模型 ${sessionId} -> ${result.selected.provider}/${result.selected.model}（忽略思考强度）`);
             return 'applied';
@@ -17158,7 +17180,18 @@ async function main(options = {}) {
                 // 以前这里只发 QQ、不写日志：出问题时 bridge.log 里什么都没有，排查只能靠猜（PR #24）。
                 log(`⚠️ agent 处理出错 (${key})：${safeMsg}`);
                 appendActivity(`${key} agent 处理出错：${safeMsg.slice(0, 80)}`);
-                await sendToQQ(key, `⚠️ agent 处理出错：${safeMsg}`);
+                // 错误提示只发主人私聊，且同一条错误 6 小时内只发一次。
+                // 2026-11-15 实测：配置的 provider 失效时，每小时一次主动唤醒都会把
+                // 「no adapter registered」原样发到聊天里，像刷屏机器人。
+                const ownerKey = cfg.ownerQQ ? `private:${cfg.ownerQQ}` : '';
+                const noticeKey = `${key}|${safeMsg.slice(0, 120)}`;
+                const lastNotice = Number(agentErrorNoticeAt.get(noticeKey) ?? 0);
+                if (ownerKey && key === ownerKey && Date.now() - lastNotice > 6 * 60 * 60 * 1000) {
+                  agentErrorNoticeAt.set(noticeKey, Date.now());
+                  await sendToQQ(key, `⚠️ agent 处理出错：${safeMsg}`);
+                } else if (key !== ownerKey) {
+                  log(`（非主人会话，错误只记日志不外发：${key}）`);
+                }
                 if (isFarewell) {
                   const st = socialState(key);
                   if (st.phase === 'exiting') {

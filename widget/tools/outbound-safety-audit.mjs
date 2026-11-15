@@ -336,6 +336,21 @@ ok(`路径脱敏行为用例 ${REDACT_CASES.length} 条`);
   } else ok('全角 Markdown 会归一，抖音的 dshsticker 引用会发真图');
 }
 
+// ── 12) 回合出错：只提示主人 + 节流；provider 失效先自愈 ─────────────────
+//     2026-11-15 真机：配置的 provider 在当前实例不存在（桌面版渠道包 trae → web 实例），
+//     每个主动唤醒回合都返回 no adapter registered，并被原样发进 QQ，每小时刷屏。
+{
+  if (!/key === ownerKey[\s\S]{0,300}sendToQQ\(/.test(src)) {
+    fail('[错误提示] agent 出错不再限制「只发主人私聊」：朋友/群聊会收到内部错误');
+  } else if (!/agentErrorNoticeAt/.test(src) || !/6 \* 60 \* 60 \* 1000/.test(src)) {
+    fail('[错误提示] agent 出错提示没有节流（同一条错误会反复刷屏）');
+  } else ok('agent 出错只发主人私聊，且同一条错误 6 小时内只提示一次');
+
+  if (!/healed-target:/.test(src) || !/provider: effective\.provider/.test(src)) {
+    fail('[模型自愈] ensureChatModel 没有处理「配置 provider 在当前实例不存在」：会每回合报 no adapter');
+  } else ok('配置 provider 缺失时会自动切到当前实例可用模型');
+}
+
 // ── 结果 ──────────────────────────────────────────────────────────────
 for (const n of notes) console.log(`  ok   ${n}`);
 if (failures.length) {

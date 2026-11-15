@@ -199,6 +199,12 @@
   裸 base64、网关本机文件路径三种返回；
   ② AstrBot 插件还停在 v1.0.0（没有语音转发），现升级到 v1.1.0；
   ③ 本机 `socialV2.voice.asr` 一直是关闭状态，现已在本地配置开启（原文件备份 `config.json.bak-before-asr`）。
+- **QQ 每小时收到「no adapter registered for provider "trae"」**（2026-11-15 真机）：
+  QQ 配置里保存的 provider 是桌面版渠道包 `trae`，当前 web 实例没有这个 provider；
+  桥接仍强行 `selectModel` → 每个主动唤醒回合都失败，错误文本还被原样发进 QQ。
+  现在 `ensureChatModel` 先查当前实例模型目录，目标 provider 不存在就自动切到
+  同名/首个可用模型（实测 `trae` → `deepseek-official/deepseek-flash`，回合恢复正常）；
+  同时 agent 出错提示改为**只发主人私聊**，同一条错误 6 小时最多一次，不再刷屏。
 - **内置桥在 DSH 里根本起不来（真机复现）**（2026-11-15）：
   `consolePortInUse()` 用 `netstat -ano` 判断 3100 是否被占用，但连接多的机器上
   输出会超过 `execFileSync` 默认 1MB 缓冲 → 抛 ENOBUFS → catch 一律当成「已有桥接在跑」，
