@@ -200,10 +200,21 @@ const bridgeSrc = readAll(path.join(ROOT, 'src/bridge.js'));
 const backendSrc = readAll(path.join(ROOT, 'backend/lib/index.js'));
 const statusWired = bridgeSrc.includes("'/api/voice/doubao-web/status'")
   && uiVoiceSrc.includes("'/voice/doubao-web/status'")
-  && backendSrc.includes('${API_PREFIX}/voice/doubao-web/status');
+  && backendSrc.includes('${API_PREFIX}/voice/doubao-web/');
 if (routes.includes('doubao-web') && !statusWired) {
   fail('[音源清单] 豆包网页登录状态接口没接全（设置页 / 桥接 / 插件后端三层缺一层，用户只能靠失败反推登录态）');
 } else if (routes.includes('doubao-web')) ok('豆包网页登录状态接口三层已接线（设置页 → 插件后端代理 → 桥接）');
+
+// 设置页下拉选音色：列表接口 + 立即切换接口都必须三层接线，且切换后要同步内存配置
+// （只改浏览器不改 cfg 的话，下一次合成又按旧配置切回去 —— 就是「改音色要重启」的根因）。
+const voicePickWired = ['voices', 'voice'].every((k) => bridgeSrc.includes(`'/api/voice/doubao-web/${k}'`)
+  && uiVoiceSrc.includes(`/voice/doubao-web/${k}`))
+  && backendSrc.includes('${API_PREFIX}/voice/doubao-web/')
+  && /cfg\.socialV2\.voice\.tts\.doubaoWebVoice\s*=/.test(bridgeSrc)
+  && /export async function listDoubaoWebVoices/.test(readAll(path.join(ROOT, 'src/voice-doubao-web.js')));
+if (routes.includes('doubao-web') && !voicePickWired) {
+  fail('[音源清单] 豆包网页音色下拉没接全（voices/voice 三层 + 切换后同步内存 cfg，否则「选了不生效 / 要重启」）');
+} else if (routes.includes('doubao-web')) ok('豆包网页音色下拉三层已接线，且切换即时同步内存配置');
 
 // ── 结果 ──────────────────────────────────────────────────────────────
 for (const n of notes) console.log(`  ok   ${n}`);

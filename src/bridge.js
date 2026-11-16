@@ -56,7 +56,7 @@ import { DEFAULT_ONLINE_DESC, DEFAULT_ONLINE_LANGUAGE } from './voice-online-tts
 import { DOUBAO_DEFAULT_VOICE } from './voice-doubao-tts.js';
 import { QWEN_DEFAULT_VOICE, QWEN_DEFAULT_MODEL } from './voice-qwen-tts.js';
 import { DEEPSEEK_DEFAULT_VOICE } from './voice-deepseek-tts.js';
-import { doubaoWebStatus, openDoubaoWebLogin } from './voice-doubao-web.js';
+import { doubaoWebStatus, listDoubaoWebVoices, openDoubaoWebLogin, selectDoubaoWebVoice } from './voice-doubao-web.js';
 import { resolveSearchApiKey } from './web-search.js';
 import { synthesizeToFileByRoute, VOICE_ROUTES } from './voice-routes.mjs';
 import { redactLocalPaths } from './redact-paths.mjs';
@@ -7411,6 +7411,43 @@ async function main(options = {}) {
               timeoutMs: 4 * 60 * 1000,
             });
             sendJson({ ok: true, uid: r?.uid || '' });
+          } catch (error) {
+            sendJson({ ok: false, error: String(error?.message ?? error).slice(0, 300) });
+          }
+          return;
+        }
+
+        // 网页音色列表 / 立即切换音色：设置页下拉直接调这两条。
+        // voices 真打开一次豆包网页读「声音选择」列表；voice 立刻改浏览器里选中的音色，
+        // 并顺手更新内存配置（cfg）——语音合成读的是 voiceCfg() → cfg.socialV2.voice.tts，
+        // 只改浏览器不改 cfg 的话，下一次合成又会按旧配置切回去（表现为「改了不生效，要重启」）。
+        if (req.method === 'GET' && url.pathname === '/api/voice/doubao-web/voices') {
+          const v = voiceCfg();
+          try {
+            sendJson(await listDoubaoWebVoices({
+              profileDir: v.tts.doubaoWebProfileDir,
+              headless: v.tts.doubaoWebHeadless,
+            }));
+          } catch (error) {
+            sendJson({ ok: false, error: String(error?.message ?? error).slice(0, 300) });
+          }
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/voice/doubao-web/voice') {
+          const v = voiceCfg();
+          const body = JSON.parse((await readBody()) || '{}');
+          const name = String(body.name ?? '').trim();
+          try {
+            const r = await selectDoubaoWebVoice({
+              name,
+              profileDir: v.tts.doubaoWebProfileDir,
+              headless: v.tts.doubaoWebHeadless,
+            });
+            cfg.socialV2 = cfg.socialV2 && typeof cfg.socialV2 === 'object' ? cfg.socialV2 : {};
+            cfg.socialV2.voice = cfg.socialV2.voice && typeof cfg.socialV2.voice === 'object' ? cfg.socialV2.voice : {};
+            cfg.socialV2.voice.tts = cfg.socialV2.voice.tts && typeof cfg.socialV2.voice.tts === 'object' ? cfg.socialV2.voice.tts : {};
+            cfg.socialV2.voice.tts.doubaoWebVoice = name;
+            sendJson({ ...r, name });
           } catch (error) {
             sendJson({ ok: false, error: String(error?.message ?? error).slice(0, 300) });
           }

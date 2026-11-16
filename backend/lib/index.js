@@ -3251,21 +3251,38 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
   // 所以必须在这里代理到桥接 /api/voice/doubao-web/*。
   // 漏了这层代理时，设置页拿到的是本文件的 404，页面只会显示「读不到状态接口（后端没重启）」，
   // 看着像后端没升级，其实是路由没接（2026-11 用户反馈）。
-  // 登录要真实弹 Edge 等扫码（桥接侧最长 4 分钟），超时按 4.5 分钟放。
+  // status/voices 要先开浏览器，给 2 分钟；login 要真实弹 Edge 等扫码（桥接侧最长 4 分钟），按 4.5 分钟放。
   async function handleVoiceDoubaoWeb(req, res, url) {
-    const isLogin = url.pathname.endsWith('/login');
-    const method = String(req.method || 'GET').toUpperCase();
-    if (isLogin ? method !== 'POST' : method !== 'GET') {
-      json(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', error: isLogin ? '只支持 POST' : '只支持 GET' });
+    const kind = String(url.pathname.split('/').pop() || '');
+    const spec = {
+      status: { method: 'GET', timeout: 120_000 },
+      login: { method: 'POST', timeout: 270_000 },
+      voices: { method: 'GET', timeout: 120_000 },
+      voice: { method: 'POST', timeout: 90_000 },
+    }[kind];
+    if (!spec) {
+      json(res, 404, { ok: false, code: 'UNKNOWN_DOUBAO_WEB_API', error: `未知的豆包网页音源接口：${kind}` });
       return;
     }
-    const target = `${consoleBase()}/api/voice/doubao-web/${isLogin ? 'login' : 'status'}`;
+    const method = String(req.method || 'GET').toUpperCase();
+    if (method !== spec.method) {
+      json(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', error: `只支持 ${spec.method}` });
+      return;
+    }
+    const target = `${consoleBase()}/api/voice/doubao-web/${kind}`;
+    let body = null;
+    if (spec.method === 'POST') {
+      // voice 要带参数 { name }；login 不需要参数，也要带个合法 JSON 体。
+      body = kind === 'voice'
+        ? JSON.stringify(await readJsonBody(req).catch(() => ({})))
+        : '{}';
+    }
     try {
       const r = await fetch(target, {
-        method: isLogin ? 'POST' : 'GET',
-        headers: { 'x-console-token': consoleToken(), ...(isLogin ? { 'content-type': 'application/json' } : {}) },
-        ...(isLogin ? { body: '{}' } : {}),
-        signal: AbortSignal.timeout(isLogin ? 270_000 : 120_000),
+        method: spec.method,
+        headers: { 'x-console-token': consoleToken(), ...(spec.method === 'POST' ? { 'content-type': 'application/json' } : {}) },
+        ...(body ? { body } : {}),
+        signal: AbortSignal.timeout(spec.timeout),
       });
       let data = {};
       try { data = await r.json(); } catch { data = {}; }
@@ -5272,10 +5289,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
     if (pathname.startsWith(`${API_PREFIX}/persona`)) { await handlePersonaState(req, res, url); return; }
     if (pathname.startsWith(`${API_PREFIX}/learning`)) { await handleLearning(req, res, url); return; }
     if (pathname === `${API_PREFIX}/voice/preview`) { await handleVoicePreview(req, res, url); return; }
-    if (pathname === `${API_PREFIX}/voice/doubao-web/status` || pathname === `${API_PREFIX}/voice/doubao-web/login`) {
-      await handleVoiceDoubaoWeb(req, res, url);
-      return;
-    }
+    if (pathname.startsWith(`${API_PREFIX}/voice/doubao-web/`)) { await handleVoiceDoubaoWeb(req, res, url); return; }
     // DeepSeek key 状态体检：语音（TTS/ASR）和联网搜索共用这把 key，失效时全部静默降级，
     // 现在设置页能直接看见（2026-11-14 体检；余额接口免费，结果缓存 10 分钟）。
     if (pathname === `${API_PREFIX}/deepseek-status`) { await handleDeepseekStatus(req, res); return; }

@@ -275,36 +275,44 @@ function normalizeWords(text) {
 }
 
 /**
- * 按显示名切换朗读音色（设置 → 通用 → 声音选择）。
- * 失败只告警不抛：音色不对总比整条语音发不出去好，调用方也能看到日志。
+ * 打开「设置 → 通用 → 声音选择」，读出列表里的全部显示名。
+ * 列表项形如「温柔桃子 / 女 / 青年 / 温柔」（第一行是名字，下面几行是标签）。
  */
-async function applyVoice(rt, wantedName) {
+async function openVoiceList(rt) {
   const { page } = rt;
+  await closeSettingsIfOpen(page);
+  await page.locator('[data-testid="sidebar_footer_setting_entry"]').click({ timeout: 15000 });
+  const modal = page.locator('[data-testid="settings_modal"]');
+  await modal.waitFor({ state: 'visible', timeout: 15000 });
+  await page.locator('[data-testid="settings-category-general"]').click({ timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(400);
+  await page.getByText('声音选择', { exact: true }).last().click({ timeout: 10000 });
+  await page.waitForTimeout(1200);
+  const items = modal.locator('[class*="speaker-item-"]');
+  const total = await items.count();
+  if (!total) throw new Error('音色列表没加载出来');
+  const names = [];
+  for (let i = 0; i < total; i += 1) {
+    let first = '';
+    try { first = String(await items.nth(i).innerText()).split('\n')[0].trim(); } catch { /* 虚拟列表可能滚掉 */ }
+    names.push(first);
+  }
+  return { page, modal, items, names };
+}
+
+/**
+ * 按显示名切换朗读音色。
+ * 默认失败只告警不抛：音色不对总比整条语音发不出去好；
+ * 用户在设置页手动选音色时用 strict，让失败原因能显示出来。
+ */
+async function applyVoice(rt, wantedName, options = {}) {
   const name = String(wantedName || '').trim();
   if (!name) return false;
   try {
-    await closeSettingsIfOpen(page);
-    await page.locator('[data-testid="sidebar_footer_setting_entry"]').click({ timeout: 15000 });
-    const modal = page.locator('[data-testid="settings_modal"]');
-    await modal.waitFor({ state: 'visible', timeout: 15000 });
-    await page.locator('[data-testid="settings-category-general"]').click({ timeout: 10000 }).catch(() => {});
-    await page.waitForTimeout(400);
-    await page.getByText('声音选择', { exact: true }).last().click({ timeout: 10000 });
-    await page.waitForTimeout(1200);
-
-    // 列表项形如「温柔桃子 / 女 / 青年 / 温柔」（第一行是名字，下面几行是标签）。
+    const { page, modal, items, names } = await openVoiceList(rt);
     // 名字里可能带「（升级版）」/「（经典版）」，所以先严格匹配全文，再忽略括号匹配，
     // 无括号的那一项就是升级版（豆包网页把「升级版」这个后缀省掉了）。
-    const items = modal.locator('[class*="speaker-item-"]');
-    const total = await items.count();
-    if (!total) throw new Error('音色列表没加载出来');
     const norm = (s) => String(s || '').replace(/[\s\u3000]/g, '').replace(/（.*?）|\(.*?\)/g, '');
-    const names = [];
-    for (let i = 0; i < total; i += 1) {
-      let first = '';
-      try { first = String(await items.nth(i).innerText()).split('\n')[0].trim(); } catch { /* 虚拟列表可能滚掉 */ }
-      names.push(first);
-    }
     const strict = names.indexOf(name);
     let index = strict;
     if (index < 0) {
@@ -324,10 +332,47 @@ async function applyVoice(rt, wantedName) {
     await modal.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
     return true;
   } catch (error) {
-    console.warn(`[voice][doubao-web] 切换音色「${name}」失败，沿用网页当前音色：${String(error?.message ?? error).slice(0, 160)}`);
-    await closeSettingsIfOpen(page).catch(() => {});
+    const reason = `切换音色「${name}」失败：${String(error?.message ?? error).slice(0, 160)}`;
+    await closeSettingsIfOpen(rt.page).catch(() => {});
+    if (options.strict) throw new Error(reason);
+    console.warn(`[voice][doubao-web] ${reason}，沿用网页当前音色`);
     return false;
   }
+}
+
+/**
+ * 列出网页「声音选择」里的全部音色显示名（设置页下拉用）。
+ * 首次会启动浏览器（6~10 秒），之后复用同一个浏览器实例。
+ */
+export async function listDoubaoWebVoices({ profileDir = '', headless = true } = {}) {
+  // 和合成共用同一个浏览器页面，必须排进串行队列，否则会和「发送→点朗读」抢页面。
+  return serialize(async () => {
+    const rt = await getRuntime({ profileDir, headless });
+    await ensureChatPage(rt);
+    const { page, names } = await openVoiceList(rt);
+    await closeSettingsIfOpen(page).catch(() => {});
+    const voices = [...new Set(names.filter(Boolean))];
+    return { ok: true, voices, count: voices.length, uid: rt.uid || '', profileDir: rt.dir };
+  });
+}
+
+/**
+ * 立即切换网页音色（不重启 DSH）：空名 = 跟随网页当前音色（不主动切）。
+ * 只改运行中的浏览器，不改配置文件；持久化仍由设置页「保存」完成。
+ */
+export async function selectDoubaoWebVoice({ name = '', profileDir = '', headless = true } = {}) {
+  return serialize(async () => {
+    const rt = await getRuntime({ profileDir, headless });
+    await ensureChatPage(rt);
+    const wanted = String(name || '').trim();
+    if (!wanted) {
+      rt.appliedVoice = '';
+      return { ok: true, voice: '', uid: rt.uid || '' };
+    }
+    await applyVoice(rt, wanted, { strict: true });
+    rt.appliedVoice = wanted;
+    return { ok: true, voice: wanted, uid: rt.uid || '' };
+  });
 }
 
 async function snapshot(page) {
