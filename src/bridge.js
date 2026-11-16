@@ -7435,8 +7435,9 @@ async function main(options = {}) {
         }
         if (req.method === 'POST' && url.pathname === '/api/voice/doubao-web/voice') {
           const v = voiceCfg();
-          const body = JSON.parse((await readBody()) || '{}');
-          const name = String(body.name ?? '').trim();
+          // readBody() 返回的是已解析的对象（不是字符串），别再 JSON.parse。
+          const body = await readBody().catch(() => ({}));
+          const name = String(body?.name ?? '').trim();
           try {
             const r = await selectDoubaoWebVoice({
               name,
