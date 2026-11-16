@@ -157,6 +157,34 @@ if (qqConfigImpl.length > 4) {
   fail(`[配置路径] 有 ${qqConfigImpl.length} 处自己拼 QQ 配置路径（${qqConfigImpl.map((f) => path.relative(ROOT, f)).join(', ')}）：漏一层目录就会读不到配置`);
 } else ok(`QQ 配置路径拼接集中在 ${qqConfigImpl.length} 处（可接受）`);
 
+// ── 5) 音源清单与失败回落不分叉 ────────────────────────────────────────
+// 加音源时最容易漏的两步：设置页下拉没加（用户选不到）、私有链路失败没回落
+//（一个音源挂掉连带整条 QQ 语音不可用）。默认音色常量也必须两处一致。
+const routesSrc = readAll(path.join(ROOT, 'src/voice-routes.mjs'));
+const routesDef = routesSrc.match(/export const VOICE_ROUTES = \[([^\]]+)\]/);
+const routes = routesDef ? [...routesDef[1].matchAll(/'([^']+)'/g)].map((m) => m[1]) : [];
+const uiVoiceSrc = readAll(path.join(ROOT, 'lib/ui/pages/130-voice.js'));
+if (!routes.length) {
+  fail('[音源清单] 读不到 voice-routes.mjs 的 VOICE_ROUTES');
+} else {
+  const missingRoutes = routes.filter((r) => !uiVoiceSrc.includes(`value: '${r}'`));
+  if (missingRoutes.length) {
+    fail(`[音源清单] 设置页缺少音源选项：${missingRoutes.join(', ')}（新音源必须能选，否则等于没接）`);
+  } else ok(`音源清单一致（${routes.length} 路都有设置项）`);
+}
+if (routes.includes('doubao-web') && !/fallbackFrom: effective/.test(routesSrc)) {
+  fail('[音源清单] doubao-web 没有回落到 edge：私有链路挂掉会连带语音条不可用');
+} else if (routes.includes('doubao-web')) ok('doubao-web 失败会回落 edge');
+
+const doubaoWebDefaults = [
+  ['src/voice-doubao-web.js', /export const DOUBAO_WEB_DEFAULT_VOICE = '([^']+)'/],
+  ['lib/ui/pages/130-voice.js', /const DOUBAO_WEB_VOICE_DEFAULT = '([^']+)'/],
+  ['config.example.json', /"doubaoWebVoice":\s*"([^"]+)"/],
+].map(([rel, re]) => (readAll(path.join(ROOT, rel)).match(re) || [])[1] || '');
+if (doubaoWebDefaults.some((x) => !x) || new Set(doubaoWebDefaults).size !== 1) {
+  fail(`[音源清单] 豆包网页默认音色不一致：${doubaoWebDefaults.map((x) => x || '(缺)').join(' / ')}`);
+} else ok(`豆包网页默认音色一致（${doubaoWebDefaults[0]}）`);
+
 // ── 结果 ──────────────────────────────────────────────────────────────
 for (const n of notes) console.log(`  ok   ${n}`);
 if (failures.length) {
@@ -165,4 +193,4 @@ if (failures.length) {
   console.error('\n修复方向：把分叉的实现统一到共享模块，而不是各修各的。');
   process.exit(1);
 }
-console.log('\n✔ 跨模块口径审计通过：数据目录 / 今天 / 出站清洗 / 配置路径都只有一个实现。');
+console.log('\n✔ 跨模块口径审计通过：数据目录 / 今天 / 出站清洗 / 配置路径 / 音源清单都只有一个实现。');

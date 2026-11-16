@@ -38,6 +38,7 @@ import { DEFAULT_ONLINE_DESC, DEFAULT_ONLINE_LANGUAGE } from '../../src/voice-on
 import { DOUBAO_DEFAULT_VOICE } from '../../src/voice-doubao-tts.js';
 import { QWEN_DEFAULT_VOICE, QWEN_DEFAULT_MODEL } from '../../src/voice-qwen-tts.js';
 import { DEEPSEEK_DEFAULT_VOICE } from '../../src/voice-deepseek-tts.js';
+import { DOUBAO_WEB_DEFAULT_VOICE } from '../../src/voice-doubao-web.js';
 import { resolveSearchApiKey } from '../../src/web-search.js';
 import { execFile as _execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -281,6 +282,11 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       // deepseek = DeepSeek 官方语音。key 允许留空，由 withDeepseekVoiceKey 兜底。
       deepseekApiKey: String(t.deepseekApiKey || '').trim(),
       deepseekVoice: String(t.deepseekVoice || DEEPSEEK_DEFAULT_VOICE),
+      // doubao-web = 豆包网页版朗读（音色最全，但慢且依赖登录态；失败由 voice-routes 回落 Edge）。
+      doubaoWebVoice: String(t.doubaoWebVoice || DOUBAO_WEB_DEFAULT_VOICE).trim() || DOUBAO_WEB_DEFAULT_VOICE,
+      doubaoWebProfileDir: String(t.doubaoWebProfileDir || '').trim(),
+      doubaoWebHeadless: t.doubaoWebHeadless !== false,
+      ffmpegPath: process.env.FFMPEG_PATH || v.ffmpegPath || null,
       edgeVoice,
       speakVoice: String(t.speakVoice || edgeVoice),
       speakRate: normalizeEdgeRate(t.speakRate),
@@ -689,7 +695,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     try {
       let resultPath, durationMs, ext, realKey;
 
-      // 七音源统一走 src/voice-routes.mjs（与 QQ 语音条同一个实现，避免两份 if-else 漂移）。
+      // 八音源统一走 src/voice-routes.mjs（与 QQ 语音条同一个实现，避免两份 if-else 漂移）。
       // edge 的音色/语速只对朗读有意义，其它音源用各自配置里的音色，所以这里只有 edge 传 voice。
       const r = await synthesizeToFileByRoute({
         text: spoken,

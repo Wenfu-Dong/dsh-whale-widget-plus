@@ -326,7 +326,10 @@
         "timeoutMs": 60000,
         "maxChars": 120,
         "character": "",
-        "route": "edge"
+        "route": "edge",
+        "doubaoWebVoice": "温柔桃子",
+        "doubaoWebProfileDir": "",
+        "doubaoWebHeadless": true
       },
       "trigger": {
         "who": "owner",

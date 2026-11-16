@@ -56,6 +56,7 @@ import { DEFAULT_ONLINE_DESC, DEFAULT_ONLINE_LANGUAGE } from './voice-online-tts
 import { DOUBAO_DEFAULT_VOICE } from './voice-doubao-tts.js';
 import { QWEN_DEFAULT_VOICE, QWEN_DEFAULT_MODEL } from './voice-qwen-tts.js';
 import { DEEPSEEK_DEFAULT_VOICE } from './voice-deepseek-tts.js';
+import { DOUBAO_WEB_DEFAULT_VOICE } from './voice-doubao-web.js';
 import { resolveSearchApiKey } from './web-search.js';
 import { synthesizeToFileByRoute, VOICE_ROUTES } from './voice-routes.mjs';
 import { redactLocalPaths } from './redact-paths.mjs';
@@ -2240,6 +2241,14 @@ async function main(options = {}) {
         // 分发前用 withDeepseekVoiceKey 兜底复用联网搜索那把 DeepSeek key。
         deepseekApiKey: String(v.tts?.deepseekApiKey || '').trim(),
         deepseekVoice: String(v.tts?.deepseekVoice || DEEPSEEK_DEFAULT_VOICE),
+        // doubao-web = 豆包网页版朗读（常驻 Edge 抓 WS 音频帧）：音色最全，但慢且依赖登录态。
+        // voice 是网页「设置 → 通用 → 声音选择」里的显示名；profileDir 留空则用
+        // <STATE_DIR>/doubao-web-profile（登录脚本与插件共用同一个目录）。
+        doubaoWebVoice: String(v.tts?.doubaoWebVoice || DOUBAO_WEB_DEFAULT_VOICE).trim() || DOUBAO_WEB_DEFAULT_VOICE,
+        doubaoWebProfileDir: String(v.tts?.doubaoWebProfileDir || '').trim(),
+        doubaoWebHeadless: v.tts?.doubaoWebHeadless !== false,
+        // 豆包网页音频是 Ogg，需要 ffmpeg 转 mp3（与「语音库处理」共用同一个可执行文件）。
+        ffmpegPath: process.env.FFMPEG_PATH || v.ffmpegPath || null,
         // 音色映射变了就 +1，让旧音频失效（否则"换了声音还在放老的"）
         cacheVersion: Number(v.tts?.cacheVersion) || 0,
         dir: path.join(STATE_DIR, 'voice-tts')
@@ -2313,9 +2322,9 @@ async function main(options = {}) {
    *   · cloud → 本机 voxd 服务（wav，默认 8767，火山引擎声音复刻）
    * 后两条只发 HTTP，插件不捆绑模型；服务没起就直接报错，不静默换路。
    */
-  async function synthesizeByRoute({ text, voice = '', rate = '+0%', pitch = '+0Hz', timeoutMs, route: routeOverride = '' } = {}) {
+  async function synthesizeByRoute({ text, voice = '', rate = '+0%', pitch = '+0Hz', timeoutMs, route: routeOverride = '', allowFallback = true } = {}) {
     const vc = voiceCfg();
-    // 七音源分发统一在 src/voice-routes.mjs（与桌宠朗读共用一份实现，避免两边漂移）。
+    // 八音源分发统一在 src/voice-routes.mjs（与桌宠朗读共用一份实现，避免两边漂移）。
     return synthesizeToFileByRoute({
       text,
       voice,
@@ -2324,6 +2333,7 @@ async function main(options = {}) {
       route: routeOverride,
       tts: withDeepseekVoiceKey({ ...vc.tts, dir: vc.tts.dir }, routeOverride),
       timeoutMs,
+      allowFallback,
     });
   }
 
@@ -7402,7 +7412,11 @@ async function main(options = {}) {
               rate,
               pitch,
               route: routeParam,
-              timeoutMs: Math.min(Number(vc.tts.timeoutMs) || 60000, 30000),
+              allowFallback: false,
+              timeoutMs: (routeParam || vc.tts.route) === 'doubao-web'
+                // 豆包网页要等模型复读 + 朗读合成，30 秒不够；这条链路慢是设计代价。
+                ? Math.max(Number(vc.tts.timeoutMs) || 60000, 90000)
+                : Math.min(Number(vc.tts.timeoutMs) || 60000, 30000),
             });
             const buf = fs.readFileSync(out.path);
             res.writeHead(200, {
@@ -7429,7 +7443,9 @@ async function main(options = {}) {
                         ? '检查百炼 API Key 是否有效、免费额度是否用完'
                         : (route === 'deepseek'
                           ? '检查 DeepSeek API Key（留空则自动复用联网搜索的 Key）和账户余额'
-                          : '需要联网；微软 Edge 端点偶尔超时，重试一次即可'))))),
+                          : (route === 'doubao-web'
+                            ? '豆包网页音源失败已自动回落 Edge：检查登录态（node scripts/doubao-web-login.mjs）、ffmpeg 是否可用'
+                            : '需要联网；微软 Edge 端点偶尔超时，重试一次即可')))))),
             }, 502);
           }
           return;
