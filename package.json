@@ -27,6 +27,7 @@
     "presets": "node scripts/build-agent-preset-patches.mjs",
     "snowluma": "node scripts/install-snowluma.mjs",
     "audit": "node widget/tools/ci-audit.mjs --no-pack",
+    "fix-host-shadow": "node scripts/fix-host-shadow.mjs",
     "postinstall": "node scripts/patch-snowluma-sdk.mjs && node scripts/build-agent-preset-patches.mjs",
     "prepublishOnly": "node scripts/publish-guard.mjs"
   },

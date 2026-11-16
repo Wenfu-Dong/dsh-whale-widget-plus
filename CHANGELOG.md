@@ -36,10 +36,18 @@ prerelease 上界 `<0.2.0`）列为依赖。装进 profile 后，Node 解析先�
 - [src/dsh-client.js](file:///c:/Users/LZH/dsh-Dfy/src/dsh-client.js) 不再继承官方客户端，改为自带
   `ApiClientBase`（`mintRpcId` / `onEnvelope` / `postJson` + 命名空间表），协议行为不变；
 - `package.json` 删除 `@deepseek-ai/dsh-host-apiproxy` 依赖（`npm install` 会顺手清掉 52 个旧核心包）；
-- 审计新增「插件不得把宿主核心包当依赖 / 不得 import」两条断言，防止回归。
+- 审计新增「插件不得把宿主核心包当依赖 / 不得 import」两条断言，防止回归；
+- 新增 `scripts/fix-host-shadow.mjs`：给**已经装坏**的机器做一次性清理（默认只体检，
+  `--apply` 才删，只删版本低于宿主声明的旧核心包）。
 
-已受影响的环境：升级到 0.7.9 后，若仍启动失败，说明 profile 里残留旧包，删掉
-`<profile>/node_modules/@deepseek-ai/dsh-*`（或重装插件）再启动即可。
+已受影响的环境：升级到 0.7.9 后若仍启动失败，说明 profile 里残留旧包。**不要盲删**
+`node_modules/@deepseek-ai/*`（profile 里同时有宿主自己要用的 0.2.x 包，比如 browser-use），
+在 profile 目录跑体检脚本，它只清理「版本低于 profile 声明版本」的 `@deepseek-ai/dsh-*`：
+
+```powershell
+node node_modules/dsh-dfy/scripts/fix-host-shadow.mjs          # 只体检
+node node_modules/dsh-dfy/scripts/fix-host-shadow.mjs --apply  # 真删，然后完全重启 DSH
+```
 
 ### 顺带排查：另外两类「装上就跑不起来」的隐患
 
