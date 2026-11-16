@@ -185,6 +185,12 @@ if (doubaoWebDefaults.some((x) => !x) || new Set(doubaoWebDefaults).size !== 1) 
   fail(`[音源清单] 豆包网页默认音色不一致：${doubaoWebDefaults.map((x) => x || '(缺)').join(' / ')}`);
 } else ok(`豆包网页默认音色一致（${doubaoWebDefaults[0]}）`);
 
+const bridgeSrc = readAll(path.join(ROOT, 'src/bridge.js'));
+const statusWired = bridgeSrc.includes("'/api/voice/doubao-web/status'") && uiVoiceSrc.includes("'/voice/doubao-web/status'");
+if (routes.includes('doubao-web') && !statusWired) {
+  fail('[音源清单] 豆包网页登录状态接口没接全（设置页 / 桥接缺一边，用户只能靠失败反推登录态）');
+} else if (routes.includes('doubao-web')) ok('豆包网页登录状态接口已接线');
+
 // ── 结果 ──────────────────────────────────────────────────────────────
 for (const n of notes) console.log(`  ok   ${n}`);
 if (failures.length) {

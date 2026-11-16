@@ -16,8 +16,10 @@
 // TTS speaker（例如 温柔桃子（升级版）→ zh_female_taozi_conversation_v4_wvae_bigtts）。
 // 这里按**显示名**匹配（配置项 doubaoWebVoice），只在必要时切一次，失败不致命。
 //
-// 登录：首次需要人工扫码。由 scripts/doubao-web-login.mjs 打开有头窗口登录，
-// 登录态保存在 doubaoWebProfileDir（默认 <state>/doubao-web-profile）。
+// 登录：首次需要人工扫码。设置页「登录 / 换账号」按钮（或 scripts/doubao-web-login.mjs）会打开有头
+// 窗口让用户登录，登录态保存在 doubaoWebProfileDir（默认 <state>/doubao-web-profile）。
+// 换账号后可继续用：朗读音色跟着账号走，所以每次合成前按 localStorage 里的 uid 检测账号是否变化，
+// 变了就按音色名重新选一次；新账号没有该音色时只告警，沿用网页当前音色。
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -123,8 +125,23 @@ function createCapture() {
 function attachCapture(page, capture) {
   page.on('websocket', (ws) => {
     if (!/voicegenie/i.test(ws.url())) return;
-    const session = { frames: [], events: [], ended: false };
+    const session = { frames: [], events: [], ended: false, uid: '', speaker: '' };
     capture.sessions.push(session);
+    // 发出去的 StartTTS 帧里带 uid 与实际 speaker：既能在换账号时自动重设音色，
+    // 也能把「网页到底用了哪个 speaker」回显到设置页（排查音色没换过来）。
+    ws.on('framesent', (frame) => {
+      if (typeof frame.payload === 'string') return;
+      let fields;
+      try { fields = parseProto(Buffer.from(frame.payload)); } catch { return; }
+      for (const item of fields) {
+        if (item.field !== 6 || !item.bytes) continue;
+        const json = item.bytes.toString('utf8');
+        const uid = json.match(/"uid":"?([0-9]+)"?/);
+        if (uid) session.uid = uid[1];
+        const speaker = json.match(/"speaker":"([^"]+)"/);
+        if (speaker) session.speaker = speaker[1];
+      }
+    });
     ws.on('framereceived', (frame) => {
       if (typeof frame.payload === 'string') return;
       let fields;
@@ -167,25 +184,35 @@ async function launch({ profileDir, headless }) {
   const chromium = loadChromium();
   const dir = path.resolve(profileDir || defaultProfileDir());
   fs.mkdirSync(dir, { recursive: true });
-  let ctx;
-  try {
-    ctx = await chromium.launchPersistentContext(dir, {
-      channel: 'msedge',
-      headless: headless !== false,
-      viewport: { width: 1280, height: 900 },
-      locale: 'zh-CN',
-      timezoneId: 'Asia/Shanghai',
-      userAgent: EDGE_UA,
-      // 只做朗读抓帧，不需要下载/权限弹窗；静音避免在有头模式下真的出声。
-      acceptDownloads: false,
-      args: ['--no-first-run', '--no-default-browser-check', '--mute-audio', '--disable-blink-features=AutomationControlled'],
-    });
-  } catch (error) {
-    const message = String(error?.message ?? error);
-    const locked = /ProcessSingleton|SingletonLock|user data directory is already in use|EBUSY|EPERM/i.test(message);
-    throw new Error(locked
-      ? `豆包网页专用浏览器已被另一个进程占用（profile：${dir}）。关掉另一个 dsh-Dfy / 登录窗口后重试`
-      : `打不开豆包网页浏览器（${dir}）：${message.slice(0, 200)}`);
+  const options = {
+    channel: 'msedge',
+    headless: headless !== false,
+    viewport: { width: 1280, height: 900 },
+    locale: 'zh-CN',
+    timezoneId: 'Asia/Shanghai',
+    userAgent: EDGE_UA,
+    // 只做朗读抓帧，不需要下载/权限弹窗；静音避免在有头模式下真的出声。
+    acceptDownloads: false,
+    args: ['--no-first-run', '--no-default-browser-check', '--mute-audio', '--disable-blink-features=AutomationControlled'],
+  };
+  let ctx = null;
+  let lastError = null;
+  // 上一轮 ctx.close() 后 Edge 可能还有几秒没退干净（profile 仍被锁），
+  // 这时首次启动会 exit 21。隔 1.5 秒重试一次，避免「空闲关浏览器后下一句必失败」。
+  for (let attempt = 0; attempt < 2 && !ctx; attempt += 1) {
+    try {
+      ctx = await chromium.launchPersistentContext(dir, options);
+    } catch (error) {
+      lastError = error;
+      const message = String(error?.message ?? error);
+      const transient = /exitCode=21|ProcessSingleton|SingletonLock|already in use|has been closed|EBUSY|EPERM/i.test(message);
+      if (!transient || attempt === 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+  }
+  if (!ctx) {
+    const message = String(lastError?.message ?? lastError);
+    throw new Error(`打不开豆包网页浏览器（${dir}）：${message.slice(0, 200)}`);
   }
 
   const page = ctx.pages()[0] ?? await ctx.newPage();
@@ -204,6 +231,15 @@ async function getRuntime({ profileDir, headless }) {
   }
   runtime = await launch({ profileDir, headless });
   return runtime;
+}
+
+/** 登录账号标识：网页把 uid 写在 localStorage（flow_tea_user_id），账号一换这里就变。 */
+async function readUid(rt) {
+  try {
+    return String(await rt.page.evaluate(() => localStorage.getItem('flow_tea_user_id') || '')).trim();
+  } catch {
+    return '';
+  }
 }
 
 async function closeSettingsIfOpen(page) {
@@ -412,7 +448,6 @@ async function runOneTts(rt, say, timeoutMs) {
   await page.keyboard.press('Enter');
 
   const reply = await waitForReply(page, baseline, Math.min(timeoutMs, 120000));
-
   // 校验「复读」是否忠实：不忠实就失败，让调用方回落，别把错的话发出去。
   const want = normalizeWords(say);
   const got = normalizeWords(reply.text);
@@ -420,7 +455,13 @@ async function runOneTts(rt, say, timeoutMs) {
     throw new Error(`豆包没有原样复读（回复是「${reply.text.replace(/\s+/g, ' ').slice(0, 60)}」）`);
   }
 
-  return waitForAudio(rt, Math.max(15000, Math.min(timeoutMs, 60000)));
+  const audio = await waitForAudio(rt, Math.max(15000, Math.min(timeoutMs, 60000)));
+  // 从 WS 请求帧里补记 uid / 实际 speaker：uid 用于换账号检测，speaker 用于设置页回显。
+  const speaker = capture.sessions.map((s) => s.speaker).find(Boolean) || '';
+  if (speaker) rt.lastSpeaker = speaker;
+  const uid = capture.sessions.map((s) => s.uid).find(Boolean) || '';
+  if (uid) rt.uid = uid;
+  return audio;
 }
 
 /**
@@ -455,6 +496,15 @@ export async function synthesizeDoubaoWebToFile({
     const rt = await getRuntime({ profileDir, headless });
     try {
       await ensureChatPage(rt);
+      // 换账号后「网页音色选择」是跟着账号走的：uid 变了就作废本地缓存，重新按配置选一次。
+      const uid = await readUid(rt);
+      if (uid) {
+        if (rt.uid && rt.uid !== uid) {
+          console.warn('[voice][doubao-web] 检测到豆包账号已变化，将按配置重新选音色');
+          rt.appliedVoice = '';
+        }
+        rt.uid = uid;
+      }
       if (wantedVoice && rt.appliedVoice !== wantedVoice) {
         if (await applyVoice(rt, wantedVoice)) rt.appliedVoice = wantedVoice;
       }
@@ -490,6 +540,32 @@ export async function synthesizeDoubaoWebToFile({
 }
 
 /**
+ * 登录状态体检（设置页「检查登录状态」）：会真实打开一次豆包网页确认输入框在。
+ * 首次调用要启动浏览器 + 载入页面（约 6~10 秒），之后浏览器会常驻到空闲超时。
+ */
+export async function doubaoWebStatus({ profileDir = '', headless = true } = {}) {
+  const dir = path.resolve(profileDir || defaultProfileDir());
+  try {
+    const rt = await getRuntime({ profileDir, headless });
+    await ensureChatPage(rt);
+    const uid = await readUid(rt);
+    if (uid) rt.uid = uid;
+    return {
+      ok: true,
+      loggedIn: true,
+      uid,
+      voice: rt.appliedVoice || '',
+      lastSpeaker: rt.lastSpeaker || '',
+      profileDir: dir,
+    };
+  } catch (error) {
+    // 停在登录页的浏览器没有复用价值，关掉，避免下一次合成先白等 30 秒。
+    await closeRuntime().catch(() => {});
+    return { ok: false, loggedIn: false, error: String(error?.message ?? error), profileDir: dir };
+  }
+}
+
+/**
  * 打开有头浏览器让用户扫码登录（登录态写进同一个 profile）。
  * 登录成功后自动关闭；超时也关闭，由调用方提示重试。
  */
@@ -501,7 +577,7 @@ export async function openDoubaoWebLogin({ profileDir = '', timeoutMs = 5 * 60 *
     await rt.page.locator('.ProseMirror').first().waitFor({ state: 'visible', timeout: timeoutMs });
     // 留 1.5 秒让页面把登录态写稳，再关窗口。
     await rt.page.waitForTimeout(1500);
-    return true;
+    return { ok: true, uid: await readUid(rt) };
   } finally {
     await closeRuntime();
   }

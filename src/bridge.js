@@ -56,7 +56,7 @@ import { DEFAULT_ONLINE_DESC, DEFAULT_ONLINE_LANGUAGE } from './voice-online-tts
 import { DOUBAO_DEFAULT_VOICE } from './voice-doubao-tts.js';
 import { QWEN_DEFAULT_VOICE, QWEN_DEFAULT_MODEL } from './voice-qwen-tts.js';
 import { DEEPSEEK_DEFAULT_VOICE } from './voice-deepseek-tts.js';
-import { DOUBAO_WEB_DEFAULT_VOICE } from './voice-doubao-web.js';
+import { DOUBAO_WEB_DEFAULT_VOICE, doubaoWebStatus, openDoubaoWebLogin } from './voice-doubao-web.js';
 import { resolveSearchApiKey } from './web-search.js';
 import { synthesizeToFileByRoute, VOICE_ROUTES } from './voice-routes.mjs';
 import { redactLocalPaths } from './redact-paths.mjs';
@@ -7388,6 +7388,32 @@ async function main(options = {}) {
             });
           }
           sendJson({ ok: stages.every((x) => x.ok), route, stages });
+          return;
+        }
+
+        // 豆包网页音源：登录状态体检 / 打开登录窗口（换账号也走这里）。
+        // 这两条不合成、不消耗额度，只是把「能不能用」摆到设置页上，避免用户只能靠失败反推。
+        if (req.method === 'GET' && url.pathname === '/api/voice/doubao-web/status') {
+          const v = voiceCfg();
+          const status = await doubaoWebStatus({
+            profileDir: v.tts.doubaoWebProfileDir,
+            headless: v.tts.doubaoWebHeadless,
+          });
+          sendJson(status);
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/voice/doubao-web/login') {
+          const v = voiceCfg();
+          try {
+            const r = await openDoubaoWebLogin({
+              profileDir: v.tts.doubaoWebProfileDir,
+              // 比 /api 默认的 5 分钟早一点返回，避免「登录窗口刚超时、请求也刚好断」。
+              timeoutMs: 4 * 60 * 1000,
+            });
+            sendJson({ ok: true, uid: r?.uid || '' });
+          } catch (error) {
+            sendJson({ ok: false, error: String(error?.message ?? error).slice(0, 300) });
+          }
           return;
         }
 
