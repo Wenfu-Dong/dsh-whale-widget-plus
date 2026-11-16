@@ -216,6 +216,25 @@ if (routes.includes('doubao-web') && !voicePickWired) {
   fail('[音源清单] 豆包网页音色下拉没接全（voices/voice 三层 + 切换后同步内存 cfg，否则「选了不生效 / 要重启」）');
 } else if (routes.includes('doubao-web')) ok('豆包网页音色下拉三层已接线，且切换即时同步内存配置');
 
+// ── 6) 插件不得把 DSH 宿主核心包列为依赖 ──────────────────────────────
+// 真机事故（2026-11）：@deepseek-ai/dsh-host-apiproxy 把 20+ 个 @deepseek-ai/dsh-*
+// （钉在 ^0.1.1-rc.2，prerelease 上界 <0.2.0）列为普通依赖。插件一装，这些旧核心包就落进
+// profile 的 node_modules、盖掉 App 自带的 0.2.2-rc.3，于是 tool-executor-native / agent-loop
+// 这些 required 插件找不到 tools / agents / sessions / llm 服务：
+//   DesktopHostFatalError: dsh: startup failed: 2 required plugins did not activate
+// 插件只需要 RPC 协议（见 src/dsh-client.js 里的 ApiClientBase），不需要宿主核心包。
+const pkgJson = (() => { try { return JSON.parse(readAll(path.join(ROOT, 'package.json')) || '{}'); } catch { return {}; } })();
+const hostCoreDeps = Object.keys({ ...(pkgJson.dependencies || {}), ...(pkgJson.optionalDependencies || {}) })
+  .filter((k) => /^@deepseek-ai\/dsh-/.test(k));
+if (hostCoreDeps.length) {
+  fail(`[宿主依赖] package.json 把宿主核心包当依赖：${hostCoreDeps.join('、')}（会盖掉 App 自带版本，让 DSH 启动失败）`);
+} else ok('没有把宿主核心包 @deepseek-ai/dsh-* 列为依赖');
+
+const hostCoreImporters = files.filter((f) => /(?:from|require\()\s*['"]@deepseek-ai\/dsh-/.test(readAll(f)));
+if (hostCoreImporters.length) {
+  fail(`[宿主依赖] 源码 import 了宿主核心包：${hostCoreImporters.map((f) => path.relative(ROOT, f)).join('、')}`);
+} else ok('源码没有 import 宿主核心包');
+
 // ── 结果 ──────────────────────────────────────────────────────────────
 for (const n of notes) console.log(`  ok   ${n}`);
 if (failures.length) {

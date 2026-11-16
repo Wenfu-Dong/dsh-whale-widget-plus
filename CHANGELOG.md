@@ -13,6 +13,34 @@
 > 本次 **0.7.4（2026-11-06）** 是合并后的新版本；下方 `0.7.4（2026-10-29）` 是合并前独立仓库的历史记录，两者不是同一发布。
 > 本次 **0.7.5（2026-11-07）** 也是合并后的新版本；下方 `0.7.5（2026-10-29）` 同样是合并前独立仓库的历史记录，请勿混淆。
 
+## [0.7.9] - 2026-11-16
+
+### 修复：装上本插件会让整个 DSH 启动失败（required 插件未激活）
+
+真机报错（别人机器）：
+
+```
+DesktopHostFatalError: dsh: startup failed: 2 required plugins did not activate
+tool-executor-native (required) → 缺 tools
+agent-loop           (required) → 缺 agents, sessions, llm, tools, sessionProjections
+```
+
+根因不是配置，而是**依赖污染**：插件把 `@deepseek-ai/dsh-host-apiproxy@0.1.1-rc.2` 当普通依赖
+（只为继承一个 RPC 基类），而这个包又把 20+ 个 `@deepseek-ai/dsh-*`（钉在 `^0.1.1-rc.2`，
+prerelease 上界 `<0.2.0`）列为依赖。装进 profile 后，Node 解析先命中最外层那份旧核心包、
+盖掉 App 自带的 `0.2.2-rc.3`；required 插件于是找不到 `tools / agents / sessions / llm` 服务，
+整个 DSH 起不来。
+
+修法：
+
+- [src/dsh-client.js](file:///c:/Users/LZH/dsh-Dfy/src/dsh-client.js) 不再继承官方客户端，改为自带
+  `ApiClientBase`（`mintRpcId` / `onEnvelope` / `postJson` + 命名空间表），协议行为不变；
+- `package.json` 删除 `@deepseek-ai/dsh-host-apiproxy` 依赖（`npm install` 会顺手清掉 52 个旧核心包）；
+- 审计新增「插件不得把宿主核心包当依赖 / 不得 import」两条断言，防止回归。
+
+已受影响的环境：升级到 0.7.9 后，若仍启动失败，说明 profile 里残留旧包，删掉
+`<profile>/node_modules/@deepseek-ai/dsh-*`（或重装插件）再启动即可。
+
 ## [0.7.8] - 2026-11-16
 
 ### 新增音源：豆包网页版朗读（doubao-web）

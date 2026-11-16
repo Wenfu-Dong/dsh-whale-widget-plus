@@ -13,7 +13,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import YAML from 'js-yaml';
-import { AbstractApiClient } from '@deepseek-ai/dsh-host-apiproxy/client';
 
 /** DSH home：凭据文件与（历史）启动日志都在这里。 */
 export function resolveDshHome() {
@@ -293,7 +292,108 @@ function waitWithSignal(promise, signal) {
   });
 }
 
-export class NodeApiClient extends AbstractApiClient {
+/**
+ * 极简 RPC 基类：只保留本插件真正用到的能力（mintRpcId / onEnvelope / postJson + 命名空间表）。
+ *
+ * 为什么不再继承 @deepseek-ai/dsh-host-apiproxy（2026-11 真机事故）：
+ * 那个包把 20+ 个 @deepseek-ai/dsh-*（钉在 ^0.1.1-rc.2，prerelease 的上界是 <0.2.0）
+ * 列为**普通依赖**。插件一装，这些旧核心包就落进 profile 的 node_modules，Node 解析
+ * 先命中它们、盖掉 App 自带的 0.2.2-rc.3，于是 tool-executor-native / agent-loop 这类
+ * required 插件找不到 tools / agents / sessions / llm 服务，整个 DSH 起不来：
+ *   DesktopHostFatalError: dsh: startup failed: 2 required plugins did not activate
+ * 插件不该自带宿主核心服务的第二份实现，所以这里按需手写，并把那条依赖删掉。
+ */
+class ApiClientBase {
+  constructor(timeoutMs = 30_000) { this.timeoutMs = timeoutMs; }
+
+  /** Node 没有 location；子类用配置里的 DSH 地址覆盖。 */
+  resolveBase() { return this.baseUrl; }
+
+  /** 信封钩子：本插件不订阅，留空即可（子类可覆盖做日志）。 */
+  onEnvelope() {}
+
+  mintRpcId() { return randomUUID(); }
+
+  async postJson(path, body, signal, timeoutPolicy = 'default') {
+    const requestSignal = timeoutPolicy === 'default'
+      ? (signal === undefined ? AbortSignal.timeout(this.timeoutMs) : AbortSignal.any([AbortSignal.timeout(this.timeoutMs), signal]))
+      : signal;
+    const response = await this.doFetch(new URL(path, this.resolveBase()), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      ...(requestSignal === undefined ? {} : { signal: requestSignal })
+    });
+    if (!response.ok) throw new Error(`transport failure for ${path}: HTTP ${response.status}`);
+    return response;
+  }
+
+  // 命名空间表：方法名 → RPC 方法（点号形式）。与官方客户端的映射保持一致。
+  sessions = {
+    list: (payload, signal) => this.callUnary('session.list', payload, signal),
+    search: (payload, signal) => this.callUnary('session.search', payload, signal),
+    create: (payload, signal) => this.callUnary('session.create', payload, signal),
+    history: (payload, signal) => this.callUnary('session.history', payload, signal),
+    models: (payload, signal) => this.callUnary('session.models', payload, signal),
+    selectModel: (payload, signal) => this.callUnary('session.selectModel', payload, signal),
+    rename: (payload, signal) => this.callUnary('session.rename', payload, signal),
+    fork: (payload, signal) => this.callUnary('session.fork', payload, signal),
+    prompt: (payload, signal) => this.callUnary('session.prompt', payload, signal),
+    attachment: (payload, signal) => this.callUnary('session.attachment', payload, signal),
+    updateQueue: (payload, signal) => this.callUnary('session.updateQueue', payload, signal),
+    cancel: (payload, signal) => this.callUnary('session.cancel', payload, signal)
+  };
+  subagents = {
+    list: (payload, signal) => this.callUnary('subagent.list', payload, signal),
+    history: (payload, signal) => this.callUnary('subagent.history', payload, signal),
+    prompt: (payload, signal) => this.callUnary('subagent.prompt', payload, signal),
+    interrupt: (payload, signal) => this.callUnary('subagent.interrupt', payload, signal)
+  };
+  host = {
+    describe: (payload, signal) => this.callUnary('host.describe', payload, signal),
+    pickDirectory: (payload, signal) => this.callUnary('host.pickDirectory', payload, signal, 'caller-signal-only'),
+    listDirectory: (payload, signal) => this.callUnary('host.listDirectory', payload, signal),
+    createDirectory: (payload, signal) => this.callUnary('host.createDirectory', payload, signal),
+    openPath: (payload, signal) => this.callUnary('host.openPath', payload, signal)
+  };
+  workspace = {
+    list: (payload, signal) => this.callUnary('workspace.list', payload, signal),
+    create: (payload, signal) => this.callUnary('workspace.create', payload, signal),
+    rename: (payload, signal) => this.callUnary('workspace.rename', payload, signal),
+    delete: (payload, signal) => this.callUnary('workspace.delete', payload, signal),
+    insertBefore: (payload, signal) => this.callUnary('workspace.insertBefore', payload, signal),
+    insertSessionBefore: (payload, signal) => this.callUnary('workspace.insertSessionBefore', payload, signal),
+    archiveSession: (payload, signal) => this.callUnary('workspace.archiveSession', payload, signal)
+  };
+  skills = { list: (payload, signal) => this.callUnary('skill.list', payload, signal) };
+  goals = {
+    create: (payload, signal) => this.callUnary('goal.create', payload, signal),
+    edit: (payload, signal) => this.callUnary('goal.edit', payload, signal),
+    pause: (payload, signal) => this.callUnary('goal.pause', payload, signal),
+    resume: (payload, signal) => this.callUnary('goal.resume', payload, signal),
+    complete: (payload, signal) => this.callUnary('goal.complete', payload, signal),
+    clear: (payload, signal) => this.callUnary('goal.clear', payload, signal)
+  };
+  settings = {
+    describe: (payload, signal) => this.callUnary('settings.describe', payload, signal),
+    openDocument: (payload, signal) => this.callUnary('settings.openDocument', payload, signal),
+    update: (payload, signal) => this.callUnary('settings.update', payload, signal),
+    replace: (payload, signal) => this.callUnary('settings.replace', payload, signal),
+    mutate: (payload, signal) => this.callUnary('settings.mutate', payload, signal)
+  };
+  credentials = {
+    describe: (payload, signal) => this.callUnary('credentials.describe', payload, signal),
+    set: (payload, signal) => this.callUnary('credentials.set', payload, signal),
+    unset: (payload, signal) => this.callUnary('credentials.unset', payload, signal)
+  };
+  llm = {
+    providers: (payload, signal) => this.callUnary('llm.providers', payload, signal),
+    models: (payload, signal) => this.callUnary('llm.models', payload, signal),
+    discoverModels: (payload, signal) => this.callUnary('llm.discoverModels', payload, signal)
+  };
+}
+
+export class NodeApiClient extends ApiClientBase {
   constructor(baseUrl, timeoutMs, auth) {
     super(timeoutMs);
     this.baseUrl = String(baseUrl ?? 'http://127.0.0.1:3080').replace(/\/+$/, '');
@@ -610,9 +710,7 @@ export class NodeApiClient extends AbstractApiClient {
 
   /**
    * 覆写 unary RPC：适配 DSH 0.1.2 起、0.1.5 仍沿用的斜杠 endpoint 和 { args } 包装，
-   * 并且只解析最外层信封，不依赖官方包的 value schema
-   * （桥接依赖的 @deepseek-ai/dsh-host-apiproxy 是独立的旧版客户端包，DSH 升级不影响它）。
-   * 注意：新版基类里 callUnary 是 protected/private，这里用同名 public 方法覆写即可，
+   * 并且只解析最外层信封，不依赖官方包的值校验（zod）。
    * 业务侧一律走桥接自己的 sessions/workspace/settings 门面，不依赖基类的域方法。
    */
   async callUnary(method, payload, signal, timeoutPolicy = 'default') {
