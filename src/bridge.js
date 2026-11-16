@@ -56,7 +56,7 @@ import { DEFAULT_ONLINE_DESC, DEFAULT_ONLINE_LANGUAGE } from './voice-online-tts
 import { DOUBAO_DEFAULT_VOICE } from './voice-doubao-tts.js';
 import { QWEN_DEFAULT_VOICE, QWEN_DEFAULT_MODEL } from './voice-qwen-tts.js';
 import { DEEPSEEK_DEFAULT_VOICE } from './voice-deepseek-tts.js';
-import { DOUBAO_WEB_DEFAULT_VOICE, doubaoWebStatus, openDoubaoWebLogin } from './voice-doubao-web.js';
+import { doubaoWebStatus, openDoubaoWebLogin } from './voice-doubao-web.js';
 import { resolveSearchApiKey } from './web-search.js';
 import { synthesizeToFileByRoute, VOICE_ROUTES } from './voice-routes.mjs';
 import { redactLocalPaths } from './redact-paths.mjs';
@@ -2242,9 +2242,9 @@ async function main(options = {}) {
         deepseekApiKey: String(v.tts?.deepseekApiKey || '').trim(),
         deepseekVoice: String(v.tts?.deepseekVoice || DEEPSEEK_DEFAULT_VOICE),
         // doubao-web = 豆包网页版朗读（常驻 Edge 抓 WS 音频帧）：音色最全，但慢且依赖登录态。
-        // voice 是网页「设置 → 通用 → 声音选择」里的显示名；profileDir 留空则用
-        // <STATE_DIR>/doubao-web-profile（登录脚本与插件共用同一个目录）。
-        doubaoWebVoice: String(v.tts?.doubaoWebVoice || DOUBAO_WEB_DEFAULT_VOICE).trim() || DOUBAO_WEB_DEFAULT_VOICE,
+        // voice 是网页「设置 → 通用 → 声音选择」里的显示名；留空 = 跟随网页当前音色
+        //（在网页里换音色后自动生效）。profileDir 留空则用 <STATE_DIR>/doubao-web-profile。
+        doubaoWebVoice: String(v.tts?.doubaoWebVoice || '').trim(),
         doubaoWebProfileDir: String(v.tts?.doubaoWebProfileDir || '').trim(),
         doubaoWebHeadless: v.tts?.doubaoWebHeadless !== false,
         // 豆包网页音频是 Ogg，需要 ffmpeg 转 mp3（与「语音库处理」共用同一个可执行文件）。

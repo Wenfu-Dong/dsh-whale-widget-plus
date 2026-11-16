@@ -38,7 +38,6 @@ import { DEFAULT_ONLINE_DESC, DEFAULT_ONLINE_LANGUAGE } from '../../src/voice-on
 import { DOUBAO_DEFAULT_VOICE } from '../../src/voice-doubao-tts.js';
 import { QWEN_DEFAULT_VOICE, QWEN_DEFAULT_MODEL } from '../../src/voice-qwen-tts.js';
 import { DEEPSEEK_DEFAULT_VOICE } from '../../src/voice-deepseek-tts.js';
-import { DOUBAO_WEB_DEFAULT_VOICE } from '../../src/voice-doubao-web.js';
 import { resolveSearchApiKey } from '../../src/web-search.js';
 import { execFile as _execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -283,7 +282,8 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       deepseekApiKey: String(t.deepseekApiKey || '').trim(),
       deepseekVoice: String(t.deepseekVoice || DEEPSEEK_DEFAULT_VOICE),
       // doubao-web = 豆包网页版朗读（音色最全，但慢且依赖登录态；失败由 voice-routes 回落 Edge）。
-      doubaoWebVoice: String(t.doubaoWebVoice || DOUBAO_WEB_DEFAULT_VOICE).trim() || DOUBAO_WEB_DEFAULT_VOICE,
+      // 音色留空 = 跟随网页里当前选的音色。
+      doubaoWebVoice: String(t.doubaoWebVoice || '').trim(),
       doubaoWebProfileDir: String(t.doubaoWebProfileDir || '').trim(),
       doubaoWebHeadless: t.doubaoWebHeadless !== false,
       ffmpegPath: process.env.FFMPEG_PATH || v.ffmpegPath || null,

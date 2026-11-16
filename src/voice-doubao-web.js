@@ -14,7 +14,8 @@
 //
 // 音色：网页的朗读音色在「设置 → 通用 → 偏好设置 → 声音选择」里，服务端再把它映射成
 // TTS speaker（例如 温柔桃子（升级版）→ zh_female_taozi_conversation_v4_wvae_bigtts）。
-// 这里按**显示名**匹配（配置项 doubaoWebVoice），只在必要时切一次，失败不致命。
+// 默认**跟随网页**（配置项 doubaoWebVoice 留空 / auto）：在网页里换了音色，下一次朗读和试听
+// 就直接用新的，不需要在这里填名称。只有填了显示名时才会主动去网页里切一次（失败不致命）。
 //
 // 登录：首次需要人工扫码。设置页「登录 / 换账号」按钮（或 scripts/doubao-web-login.mjs）会打开有头
 // 窗口让用户登录，登录态保存在 doubaoWebProfileDir（默认 <state>/doubao-web-profile）。
@@ -30,7 +31,6 @@ import { pruneAudioCache, resolveFfmpeg } from './voice-core.js';
 
 const require = createRequire(import.meta.url);
 
-export const DOUBAO_WEB_DEFAULT_VOICE = '温柔桃子';
 const CHAT_URL = 'https://www.doubao.com/chat/';
 // 与真实 Edge 一致：headless 的默认 UA 带 HeadlessChrome，容易被风控直接拦。
 const EDGE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0';
@@ -481,11 +481,16 @@ export async function synthesizeDoubaoWebToFile({
   const say = String(text ?? '').trim();
   if (!say) throw new Error('要合成的内容是空的');
   if (!outDir) throw new Error('缺少 outDir（TTS 缓存目录）');
-  const wantedVoice = String(voice || DOUBAO_WEB_DEFAULT_VOICE).trim();
+  // voice 留空 / auto = 跟随网页里当前选中的音色（不主动切换）。
+  const rawVoice = String(voice || '').trim();
+  const wantedVoice = /^(auto|跟随网页|跟随网页音色)$/i.test(rawVoice) ? '' : rawVoice;
+  // 跟随网页时不能复用磁盘缓存：用户在网页里换了音色，缓存里还是旧音色，
+  // 直接返回旧文件会让「自动同步」看起来失效。所以只有指定了音色名才走缓存。
+  const cacheable = Boolean(wantedVoice);
   fs.mkdirSync(outDir, { recursive: true });
 
-  const file = path.join(outDir, `doubao-web-${cacheKey({ say, voice: wantedVoice, cacheVersion })}.mp3`);
-  if (fs.existsSync(file)) {
+  const file = path.join(outDir, `doubao-web-${cacheKey({ say, voice: wantedVoice || 'web', cacheVersion })}.mp3`);
+  if (cacheable && fs.existsSync(file)) {
     try {
       if (fs.statSync(file).size > 1024) return { path: file, durationMs: 0, cached: true, format: 'mp3' };
     } catch { /* 缓存坏了就重合成 */ }
@@ -500,7 +505,7 @@ export async function synthesizeDoubaoWebToFile({
       const uid = await readUid(rt);
       if (uid) {
         if (rt.uid && rt.uid !== uid) {
-          console.warn('[voice][doubao-web] 检测到豆包账号已变化，将按配置重新选音色');
+          if (wantedVoice) console.warn('[voice][doubao-web] 检测到豆包账号已变化，将重新按配置选音色');
           rt.appliedVoice = '';
         }
         rt.uid = uid;

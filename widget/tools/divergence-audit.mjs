@@ -176,20 +176,34 @@ if (routes.includes('doubao-web') && !/fallbackFrom: effective/.test(routesSrc))
   fail('[音源清单] doubao-web 没有回落到 edge：私有链路挂掉会连带语音条不可用');
 } else if (routes.includes('doubao-web')) ok('doubao-web 失败会回落 edge');
 
-const doubaoWebDefaults = [
-  ['src/voice-doubao-web.js', /export const DOUBAO_WEB_DEFAULT_VOICE = '([^']+)'/],
-  ['lib/ui/pages/130-voice.js', /const DOUBAO_WEB_VOICE_DEFAULT = '([^']+)'/],
-  ['config.example.json', /"doubaoWebVoice":\s*"([^"]+)"/],
-].map(([rel, re]) => (readAll(path.join(ROOT, rel)).match(re) || [])[1] || '');
-if (doubaoWebDefaults.some((x) => !x) || new Set(doubaoWebDefaults).size !== 1) {
-  fail(`[音源清单] 豆包网页默认音色不一致：${doubaoWebDefaults.map((x) => x || '(缺)').join(' / ')}`);
-} else ok(`豆包网页默认音色一致（${doubaoWebDefaults[0]}）`);
+// 豆包网页音色以「网页里选的那个」为准：配置留空 = 跟随网页，任何一层都不许把它兜底成
+// 写死的音色名（否则用户在网页换音色会被代码切回去，表现为「不同步」）。
+const forcedDoubaoVoice = [
+  ['src/voice-routes.mjs', /doubaoWebVoice\s*\|\|\s*DOUBAO_WEB_DEFAULT_VOICE/],
+  ['src/bridge.js', /doubaoWebVoice[^\n]*DOUBAO_WEB_DEFAULT_VOICE/],
+  ['backend/lib/pet-chat.js', /doubaoWebVoice[^\n]*DOUBAO_WEB_DEFAULT_VOICE/],
+  ['lib/ui/pages/130-voice.js', /qqTts\.doubaoWebVoice\s*\?\?\s*'[^']+'/],
+  ['config.example.json', /"doubaoWebVoice":\s*"[^"]+"/],
+]
+  .filter(([rel, re]) => re.test(readAll(path.join(ROOT, rel))))
+  .map(([rel]) => rel);
+if (forcedDoubaoVoice.length) {
+  fail(`[音源清单] 豆包网页音色被写死默认值：${forcedDoubaoVoice.join('、')}（留空 = 跟随网页，否则网页里换音色不会生效）`);
+} else ok('豆包网页音色默认跟随网页（各层都没有写死默认名）');
+const followsWeb = /voice:\s*tts\.doubaoWebVoice\s*\|\|\s*''/.test(routesSrc)
+  && /if \(wantedVoice && rt\.appliedVoice !== wantedVoice\)/.test(readAll(path.join(ROOT, 'src/voice-doubao-web.js')));
+if (routes.includes('doubao-web') && !followsWeb) {
+  fail('[音源清单] doubao-web 空音色没有走「跟随网页」分支（会退化成强制切某个音色）');
+} else if (routes.includes('doubao-web')) ok('doubao-web 空音色 = 跟随网页（不主动切音色）');
 
 const bridgeSrc = readAll(path.join(ROOT, 'src/bridge.js'));
-const statusWired = bridgeSrc.includes("'/api/voice/doubao-web/status'") && uiVoiceSrc.includes("'/voice/doubao-web/status'");
+const backendSrc = readAll(path.join(ROOT, 'backend/lib/index.js'));
+const statusWired = bridgeSrc.includes("'/api/voice/doubao-web/status'")
+  && uiVoiceSrc.includes("'/voice/doubao-web/status'")
+  && backendSrc.includes('${API_PREFIX}/voice/doubao-web/status');
 if (routes.includes('doubao-web') && !statusWired) {
-  fail('[音源清单] 豆包网页登录状态接口没接全（设置页 / 桥接缺一边，用户只能靠失败反推登录态）');
-} else if (routes.includes('doubao-web')) ok('豆包网页登录状态接口已接线');
+  fail('[音源清单] 豆包网页登录状态接口没接全（设置页 / 桥接 / 插件后端三层缺一层，用户只能靠失败反推登录态）');
+} else if (routes.includes('doubao-web')) ok('豆包网页登录状态接口三层已接线（设置页 → 插件后端代理 → 桥接）');
 
 // ── 结果 ──────────────────────────────────────────────────────────────
 for (const n of notes) console.log(`  ok   ${n}`);

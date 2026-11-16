@@ -19,7 +19,7 @@ import { synthesizeOnlineToFile, DEFAULT_ONLINE_DESC, DEFAULT_ONLINE_LANGUAGE } 
 import { synthesizeDoubaoToFile } from './voice-doubao-tts.js';
 import { synthesizeQwenToFile } from './voice-qwen-tts.js';
 import { synthesizeDeepseekToFile, DEEPSEEK_DEFAULT_VOICE } from './voice-deepseek-tts.js';
-import { synthesizeDoubaoWebToFile, DOUBAO_WEB_DEFAULT_VOICE } from './voice-doubao-web.js';
+import { synthesizeDoubaoWebToFile } from './voice-doubao-web.js';
 
 export const VOICE_ROUTES = ['edge', 'local', 'cloud', 'online', 'doubao', 'qwen', 'deepseek', 'doubao-web'];
 
@@ -125,7 +125,8 @@ export async function synthesizeToFileByRoute({
     try {
       const r = await synthesizeDoubaoWebToFile({
         text,
-        voice: tts.doubaoWebVoice || DOUBAO_WEB_DEFAULT_VOICE,
+        // 留空 = 跟随豆包网页里当前选的音色（在网页换音色后自动生效，不用在这里填名字）。
+        voice: tts.doubaoWebVoice || '',
         timeoutMs: Math.max(timeout, 60000),
         profileDir: tts.doubaoWebProfileDir || '',
         headless: tts.doubaoWebHeadless !== false,

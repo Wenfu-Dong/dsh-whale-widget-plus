@@ -3247,6 +3247,40 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
     }
   }
 
+  // 豆包网页音源（doubao-web）：登录态存在桥接那侧的浏览器 profile 里，面板只是个查看/触发入口，
+  // 所以必须在这里代理到桥接 /api/voice/doubao-web/*。
+  // 漏了这层代理时，设置页拿到的是本文件的 404，页面只会显示「读不到状态接口（后端没重启）」，
+  // 看着像后端没升级，其实是路由没接（2026-11 用户反馈）。
+  // 登录要真实弹 Edge 等扫码（桥接侧最长 4 分钟），超时按 4.5 分钟放。
+  async function handleVoiceDoubaoWeb(req, res, url) {
+    const isLogin = url.pathname.endsWith('/login');
+    const method = String(req.method || 'GET').toUpperCase();
+    if (isLogin ? method !== 'POST' : method !== 'GET') {
+      json(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', error: isLogin ? '只支持 POST' : '只支持 GET' });
+      return;
+    }
+    const target = `${consoleBase()}/api/voice/doubao-web/${isLogin ? 'login' : 'status'}`;
+    try {
+      const r = await fetch(target, {
+        method: isLogin ? 'POST' : 'GET',
+        headers: { 'x-console-token': consoleToken(), ...(isLogin ? { 'content-type': 'application/json' } : {}) },
+        ...(isLogin ? { body: '{}' } : {}),
+        signal: AbortSignal.timeout(isLogin ? 270_000 : 120_000),
+      });
+      let data = {};
+      try { data = await r.json(); } catch { data = {}; }
+      if (!data || typeof data !== 'object') data = {};
+      if (!r.ok && !data.error) data.error = `桥接返回 HTTP ${r.status}`;
+      json(res, r.ok ? 200 : 502, data);
+    } catch (error) {
+      json(res, 502, {
+        ok: false,
+        code: 'VOICE_DOUBAO_WEB_UNREACHABLE',
+        error: `豆包网页音源不可达（桥接是否在运行？）：${String(error?.message ?? error).slice(0, 200)}`,
+      });
+    }
+  }
+
   // DeepSeek key 状态体检：语音（TTS/ASR）和联网搜索共用这把 key，失效时全部静默
   // 降级（搜索回 Bing、语音回占位文案），以前没有任何页面能看到（2026-11-14 体检）。
   // 用官方余额接口验证（免费、顺带拿余额），结果缓存 10 分钟。
@@ -5238,6 +5272,10 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
     if (pathname.startsWith(`${API_PREFIX}/persona`)) { await handlePersonaState(req, res, url); return; }
     if (pathname.startsWith(`${API_PREFIX}/learning`)) { await handleLearning(req, res, url); return; }
     if (pathname === `${API_PREFIX}/voice/preview`) { await handleVoicePreview(req, res, url); return; }
+    if (pathname === `${API_PREFIX}/voice/doubao-web/status` || pathname === `${API_PREFIX}/voice/doubao-web/login`) {
+      await handleVoiceDoubaoWeb(req, res, url);
+      return;
+    }
     // DeepSeek key 状态体检：语音（TTS/ASR）和联网搜索共用这把 key，失效时全部静默降级，
     // 现在设置页能直接看见（2026-11-14 体检；余额接口免费，结果缓存 10 分钟）。
     if (pathname === `${API_PREFIX}/deepseek-status`) { await handleDeepseekStatus(req, res); return; }
