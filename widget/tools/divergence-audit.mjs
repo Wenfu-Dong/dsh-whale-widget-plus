@@ -235,6 +235,14 @@ if (hostCoreImporters.length) {
   fail(`[宿主依赖] 源码 import 了宿主核心包：${hostCoreImporters.map((f) => path.relative(ROOT, f)).join('、')}`);
 } else ok('源码没有 import 宿主核心包');
 
+// dsh-dfy-core 是 `file:packages/dsh-dfy-core` 依赖：files 白名单漏了 packages 的话，
+// npm/git 安装出来的包里没有它 → 安装阶段就 ENOENT，插件根本进不到加载阶段。
+const packFiles = Array.isArray(pkgJson.files) ? pkgJson.files.map(String) : [];
+const coreSpec = String(pkgJson.dependencies?.['dsh-dfy-core'] ?? '');
+if (coreSpec.startsWith('file:packages/') && !packFiles.includes('packages')) {
+  fail('[打包] package.json files 没包含 packages（dsh-dfy-core 是 file: 依赖，漏打包会让安装直接失败）');
+} else ok('打包白名单包含 packages（dsh-dfy-core 能随包安装）');
+
 // ── 结果 ──────────────────────────────────────────────────────────────
 for (const n of notes) console.log(`  ok   ${n}`);
 if (failures.length) {

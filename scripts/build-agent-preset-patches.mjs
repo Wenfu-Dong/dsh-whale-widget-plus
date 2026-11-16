@@ -180,12 +180,28 @@ export function buildPatches({ check = false, log = () => {} } = {}) {
   const results = [];
   for (const name of PRESETS) {
     const file = patchFileFor(name);
-    const content = renderPatch(name);
+    let content;
+    try {
+      content = renderPatch(name);
+    } catch (error) {
+      // postinstall 会调用本脚本。渲染失败（源文件被改坏、YAML 不合法）不该让整次
+      // npm install 失败 —— 包里已经有生成好的 presets/*.patch.yml，DSH 照样能加载。
+      // 只有 --check（发版前校验）才把这类问题升级成错误。
+      if (check) throw error;
+      log(`⚠️ ${name} 生成失败，保留包内已有产物：${error?.message ?? error}`);
+      continue;
+    }
     const current = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
     const changed = current !== content;
     if (changed && !check) {
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, content, 'utf8');
+      try {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content, 'utf8');
+      } catch (error) {
+        // 只读安装目录 / 文件被占用：同上，保留已有产物即可。
+        log(`⚠️ ${name} 写不了 ${path.relative(REPO_ROOT, file)}（${error?.code ?? error}），保留包内已有产物`);
+        continue;
+      }
     }
     log(`${changed ? (check ? '✗ 需重新生成' : '✓ 已生成') : '· 已是最新'} ${path.relative(REPO_ROOT, file)}`);
     results.push({ file, changed });

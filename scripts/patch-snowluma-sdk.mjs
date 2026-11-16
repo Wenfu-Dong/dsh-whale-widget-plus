@@ -4,11 +4,36 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
+const requireFromHere = createRequire(import.meta.url);
 
 const TARGETS = ['@snowluma/sdk', '@snowluma/mcp'];
+
+/**
+ * 找到包的 dist 目录。
+ *
+ * 不能只看 `<插件根>/node_modules/...`：插件通常是 profile 的一个依赖，npm 会把
+ * @snowluma/* **提升**到 profile 根的 node_modules，插件目录下根本没有它
+ * （旧实现在这种安装方式下会打印「dist 不存在，跳过」，于是扩展名 bug 没修，
+ * 桥接启动时直接 ERR_MODULE_NOT_FOUND —— 这是「别人装了跑不起来」的真实来源之一）。
+ * 所以优先按 Node 自己的解析规则找，找不到再退回本地 node_modules。
+ */
+function locateDist(pkg) {
+  const candidates = [];
+  try {
+    candidates.push(path.join(path.dirname(requireFromHere.resolve(`${pkg}/package.json`)), 'dist'));
+  } catch { /* 没有导出 package.json 的子路径 */ }
+  try {
+    const entry = requireFromHere.resolve(pkg);
+    const dir = path.dirname(entry);
+    candidates.push(path.basename(dir) === 'dist' ? dir : path.join(dir, 'dist'));
+  } catch { /* 解析不了就只看下面两个 */ }
+  candidates.push(path.join(ROOT, 'node_modules', pkg, 'dist'));
+  return candidates.find((p) => fs.existsSync(p)) ?? null;
+}
 
 function walk(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -27,13 +52,20 @@ let failed = 0;
  * 「装依赖」都过不去，却看不出真正原因。所以逐文件 try/catch，最后用一句明确的警告收尾。
  */
 for (const pkg of TARGETS) {
-  const distRoot = path.join(ROOT, 'node_modules', pkg, 'dist');
-  if (!fs.existsSync(distRoot)) {
-    console.log(`[patch-snowluma] ${pkg}: dist 不存在，跳过`);
+  const distRoot = locateDist(pkg);
+  if (!distRoot) {
+    console.log(`[patch-snowluma] ${pkg}: 找不到 dist（未安装或结构不同），跳过`);
     continue;
   }
   let patched = 0;
-  for (const file of walk(distRoot)) {
+  let files;
+  try {
+    files = walk(distRoot);
+  } catch (error) {
+    console.log(`[patch-snowluma] ${pkg}: 列目录失败（${error?.code ?? error}），跳过`);
+    continue;
+  }
+  for (const file of files) {
     if (!file.endsWith('.js')) continue;
     let src;
     try {

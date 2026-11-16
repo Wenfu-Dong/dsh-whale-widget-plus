@@ -41,6 +41,19 @@ prerelease 上界 `<0.2.0`）列为依赖。装进 profile 后，Node 解析先�
 已受影响的环境：升级到 0.7.9 后，若仍启动失败，说明 profile 里残留旧包，删掉
 `<profile>/node_modules/@deepseek-ai/dsh-*`（或重装插件）再启动即可。
 
+### 顺带排查：另外两类「装上就跑不起来」的隐患
+
+- **`packages/` 没进打包白名单**：`dsh-dfy-core` 是 `file:packages/dsh-dfy-core` 依赖，
+  但 `files` 里没有 `packages` → npm/git 装出来的包里缺这个目录，安装阶段直接 ENOENT。
+  已把 `packages` 加进 `files`，并在审计里钉住（`dsh-dfy-core` 是 file: 依赖时白名单必须含 packages）。
+- **postinstall 会把安装搞红**：
+  - `patch-snowluma-sdk.mjs` 原先只看 `<插件根>/node_modules/@snowluma/*`；依赖被 npm
+    提升到 profile 根时找不到 → 跳过修补 → 桥接启动时 `ERR_MODULE_NOT_FOUND`。
+    现改为按 Node 解析规则定位（`createRequire.resolve`），找不到才退回本地目录，
+    且列目录/读文件失败都不再让 postinstall 退出非零。
+  - `build-agent-preset-patches.mjs` 在 postinstall 里渲染失败会 exit 1；现在非 `--check`
+    模式下只告警并保留包内已有产物（渲染写坏/目录只读都不再阻塞安装），`--check` 仍然严格。
+
 ## [0.7.8] - 2026-11-16
 
 ### 新增音源：豆包网页版朗读（doubao-web）

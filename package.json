@@ -81,6 +81,7 @@
   "files": [
     "lib",
     "backend",
+    "packages",
     "widget",
     "!widget/docs",
     "!widget/docs/**",
