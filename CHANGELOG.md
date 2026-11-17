@@ -13,6 +13,42 @@
 > 本次 **0.7.4（2026-11-06）** 是合并后的新版本；下方 `0.7.4（2026-10-29）` 是合并前独立仓库的历史记录，两者不是同一发布。
 > 本次 **0.7.5（2026-11-07）** 也是合并后的新版本；下方 `0.7.5（2026-10-29）` 同样是合并前独立仓库的历史记录，请勿混淆。
 
+## [0.7.9] - 2026-11-17
+
+### 修复：稳定性（本轮重点）
+
+- **插件启用即崩**：`createRoles()` 未解构 `PRESET_BACKUP_DIR`，内嵌桥接一启动就抛
+  `ReferenceError`，表现为「装上插件后 DSH 直接起不来」。
+- **停机后连接复活 / 双实例**：`bot.close()` 的 close 事件会触发 token 自愈重连，与宿主 stop 竞态，
+  出现「停不掉」和同一事件流被消费两遍。现在自愈入口、close 事件、`applyHealedTokens` 重连前三处
+  都受 `shuttingDown` 闸门约束；stop 时焊死 `closedByUser / reconnect / reconnectTimer`。
+- **停止被孤儿定时器拖住**：`pumpMux` 的退避 `sleep` 改为可被停机叫醒（`sleepUnlessShutdown` + `notifyShutdown`）。
+- **停机清理补齐**：`social.pendingTimers` 里的延迟投递、挂起问答超时、`runLogTrimTimer` 现在随
+  stop 一并注销；`wakeBacklog`、`scheduleSocialReply`、`registerPending`、退役会话延迟停用、
+  SnowLuma 断线告警定时器均加 `shuttingDown` 门。
+- **发送失败不再静默**：连续 3 次发送失败进入 30 分钟唤醒暂停，状态落盘并在控制台可见。
+- **宿主被未处理拒绝带崩**：嵌入模式统一挂未处理拒绝隔离器。
+
+### 测试与护栏
+
+- 新增假宿主夹具（假 SnowLuma + 假 DSH），全链路可在离线下跑，不需要真实账号。
+- 新增 e2e：启动→状态→停机端口释放；chat 私聊全链路；发送失败进入暂停；reserved2 群 @ 唤醒直到
+  `send_group_msg`；`POST /api/mode` 离开 reserved2 取消排队唤醒。
+- 新增 `scripts/verify-real-dsh.mjs`：对真机 DSH 只读校验协议（settings / agentPresets / modelCatalog），
+  不写用户数据、不发消息。
+- 新增 `test/tools/soak.mjs`：高频私聊 + 随机发送失败的长稳脚本，采样堆与句柄并断言无单调增长。
+
+### 重构
+
+- 桥接 / 挂件 / 后端三块巨石拆为组件与路由模块（控制台核心路由、二代状态存储等）；
+  文本分条与媒体解析抽为纯函数模块并补测试。
+
+### 真机验证
+
+- SnowLuma 2.3.4（OneBot v11）登录、心跳与消息收发通过；reserved2 私聊
+  「入站 → DSH 回合 → 工具发送」全链路实测 14 秒完成。
+- 真机 DSH 自动端口发现（端口漂移后自动纠正）与协议兼容性通过（只读）。
+
 ## [0.7.8] - 2026-11-16
 
 ### 修复：装上本插件会让整个 DSH 启动失败（required 插件未激活）
