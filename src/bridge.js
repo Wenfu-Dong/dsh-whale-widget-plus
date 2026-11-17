@@ -131,6 +131,8 @@ import { createSocialV2Store } from './qq/features/social-v2-store.js';
 import { createConsoleCoreRoutes } from './qq/features/console-core-routes.js';
 import { escapeCqText, unquoteJsonString, withTimeout, sanitizeMediaSummary } from './qq/text.js';
 import { createLock } from './qq/lock.js';
+import { createEmbeddedRejectionGuard } from './embedded-rejection-guard.js';
+import { isDshProtocolMismatch } from './dsh-protocol.js';
 import { createRoles } from './qq/roles.js';
 import { KNOWN_AGENT_TOKENS, CONVERSATION_TOKENS, rememberAgentToken, forgetAgentToken, redactSensitiveText } from './qq/redaction.js';
 
@@ -158,6 +160,9 @@ let embeddedRuntime = null;
 // 但 globalThis 是共享的。没有它，旧实例的 pumpMux 会和新实例并行消费同一条
 // 事件流 —— 同一轮回复被处理两遍、发两遍（2026-11-14 日志实测）。
 const BRIDGE_SINGLETON = Symbol.for('surfcore.qq.bridge.instance');
+// 嵌入模式的「未处理拒绝隔离器」单例：插件热重载会重新 import 本文件，
+// 但 globalThis 共享 —— 没有它，每热重载一次就多挂一个 process 监听器。
+const EMBEDDED_REJECTION_GUARD = Symbol.for('surfcore.qq.rejectionGuard');
 // 二代会话状态的「立即落盘」钩子：由 main() 创建合并写器后注册。
 // 进程级退出钩子（installProcessGuards）与内嵌 stop() 都要把合并窗口里的脏数据刷掉，
 // 否则 300ms 合并期内正常退出会丢掉最后一批入站缓冲/唤醒计数。
@@ -282,7 +287,7 @@ const {
   knownPresetName, presetSourceYaml, installedPresetYaml, readPresetPromptText,
   backupPresetFile, listPresetBackups, presetStatus,
   readRoleState, writeRoleState, sanitizeRoleName, PRESET_NAMES, ROLE_INJECT_MAX_CHARS_DEFAULT,
-  ROLE_NAME_MAX, ROLE_CONTENT_MAX_BYTES,
+  ROLE_NAME_MAX, ROLE_CONTENT_MAX_BYTES, PRESET_BACKUP_DIR,
 } = createRoles({
   rolesDir: ROLES_DIR,
   roleStateFile: ROLE_STATE_FILE,
@@ -519,6 +524,31 @@ async function main(options = {}) {
   // 嵌入模式不抢锁：锁文件是给独立进程/守护脚本用的，宿主进程由 DSH 生命周期保证唯一。
   if (!embed) acquireLock();
   let shuttingDown = false;
+  // 停机叫醒机制：stop() 只置了 shuttingDown，拦得住「下一轮」，却叫不醒正在
+  // 退避 sleep 的循环。那个残留的 30s setTimeout 会让宿主进程/测试进程在插件
+  // 已经停掉之后还挂着不退出（热重载时表现为旧实例迟迟不结束）。
+  const shutdownWaiters = new Set();
+  const notifyShutdown = () => {
+    for (const wake of [...shutdownWaiters]) { try { wake(); } catch {} }
+    shutdownWaiters.clear();
+  };
+  /** 可被停机打断的 sleep：到点或被 stop() 叫醒，两者谁先发生都行。 */
+  function sleepUnlessShutdown(ms) {
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer = null;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        shutdownWaiters.delete(done);
+        resolve();
+      };
+      timer = setTimeout(done, ms);
+      timer.unref?.();
+      shutdownWaiters.add(done);
+    });
+  }
   // 事件流的显式中断器：shuttingDown 只能拦住「下一轮重连」，叫不醒正卡在
   // `for await` 里的旧实例。插件热重载时旧实例不 abort，就会和新实例并行消费
   // 同一条事件流（2026-11-14 日志：同一秒两条 `事件流已结束`，155 帧 / 183 帧），
@@ -961,8 +991,9 @@ async function main(options = {}) {
     try {
       return await api.callUnary('session.modelCatalog', {});
     } catch (error) {
-      const message = String(error?.message ?? error);
-      if (!/not.?found|unknown|unsupported|404|invalid server-response/i.test(message)) throw error;
+      // loose：旧 DSH 上端点不存在时的措辞五花八门（not found / unknown / unsupported / 404），
+      // 判据统一收在 dsh-protocol.js，避免各处再各写一条正则。
+      if (!isDshProtocolMismatch(error, { loose: true })) throw error;
       return api.callUnary('session.models', {});
     }
   }
@@ -9774,7 +9805,7 @@ async function main(options = {}) {
             + '（可在 DSH 里核对版本，或查看 issue #34）。已改为指数退避重连，不再每 3 秒刷屏。');
         }
       }
-      await sleep(retryMs);
+      await sleepUnlessShutdown(retryMs);
     }
   }
 
@@ -9987,7 +10018,9 @@ async function main(options = {}) {
       log(`   ⚠️ 写回 config.json 失败：${error?.message ?? error}`);
     }
     // 更新了就让 SDK 立刻用新参数重连（否则要等下一轮退避，最长要好几秒）
-    if (wsChanged) {
+    // 注意：自愈要读磁盘/探测端点，期间宿主可能已经 stop —— 必须在真正重连前
+    // 再看一眼 shuttingDown，否则「停机后又被自愈拉起来」。
+    if (wsChanged && !shuttingDown) {
       try { bot.close(1000, 'token-refresh'); } catch {}
       try { bot.connect(); } catch {}
     }
@@ -10006,6 +10039,10 @@ async function main(options = {}) {
 
   let tokenHealAt = 0;
   async function healTokenIfStale(reason) {
+    // 停机后绝不能自愈：stop() 里的 bot.close() 会触发 close 事件，自愈一旦成功
+    // 就会 close+connect 重新连上 SnowLuma —— 插件已经停了，却留着一个活连接，
+    // 下次启动/热重载时两个实例抢同一条消息流。
+    if (shuttingDown) return;
     const now = Date.now();
     if (now - tokenHealAt < 10000) return;   // 节流：close 事件会连续触发
     tokenHealAt = now;
@@ -10024,6 +10061,8 @@ async function main(options = {}) {
 
   bot.on('close', (info) => {
     snowlumaHealth.connected = false;
+    // 主动停机（插件 stop / 热重载）不是「断线」：不记健康、不排心跳告警、更不自愈重连。
+    if (shuttingDown) return;
     log(`SnowLuma 连接断开（code=${info?.code ?? '?'}），重连中…`);
     // 从第一次断开就开始计时：判据是「持续不可达」，与本次进程是否连过无关。
     if (!snowlumaHealth.downSince) snowlumaHealth.downSince = Date.now();
@@ -10110,6 +10149,8 @@ async function main(options = {}) {
       stop: async () => {
         if (shuttingDown) return { ok: true, already: true, message: '内嵌桥接已停止' };
         shuttingDown = true;
+        // 叫醒还在退避 sleep 里的循环，别让 stop 之后留一个孤儿定时器拖住宿主退出。
+        notifyShutdown();
         // 先叫醒事件流：不 abort 的话它一直挂在 for-await 上，旧实例会继续消费
         // 事件并与新实例抢着回复。
         try { muxAbort.abort(); } catch {}
@@ -10130,7 +10171,16 @@ async function main(options = {}) {
         try { if (proactiveTimer) { clearInterval(proactiveTimer); proactiveTimer = null; } } catch {}
         try { await qqRegistry.stopAll(); } catch {}
         try { bili.stop(); } catch {}
-        try { bot.close(1000, 'DSH plugin stopped'); } catch {}
+        try {
+          bot.close(1000, 'DSH plugin stopped');
+          // SDK 的重连定时器不属于我们的 embeddedTimers：只要还有一处晚到的
+          // request/close 把 closedByUser 重置，它就会在插件停掉之后继续每 2s
+          // 重连一次（宿主进程不退出、热重载后新旧实例同时在线）。停机是一次性的，
+          // 这里把重连入口一并焊死。
+          bot.closedByUser = true;
+          bot.reconnect = false;
+          if (bot.reconnectTimer) { clearTimeout(bot.reconnectTimer); bot.reconnectTimer = null; }
+        } catch {}
         await new Promise((resolve) => {
           try {
             consoleServer.close(() => resolve());
@@ -10253,6 +10303,17 @@ export async function startEmbedded({ dshWebUrl = '' } = {}) {
   if (!embeddedExitFlushHooked) {
     embeddedExitFlushHooked = true;
     process.on('exit', () => { try { socialV2FlushOnShutdown?.(); } catch {} });
+  }
+  // 本插件自己泄漏的未处理 Promise 拒绝不能把宿主带走：Node 默认会把它升级成
+  // 致命异常，嵌入 DSH 后"插件崩溃 = DSH 崩溃"。隔离器只吞堆栈属于本包的拒绝，
+  // 外部拒绝仍按宿主原策略处理（详见 embedded-rejection-guard.js 顶部说明）。
+  if (!globalThis[EMBEDDED_REJECTION_GUARD]) {
+    const guard = createEmbeddedRejectionGuard({
+      rootDir: ROOT,
+      log: (...args) => { try { log(...args); } catch {} },
+    });
+    guard.install();
+    globalThis[EMBEDDED_REJECTION_GUARD] = guard;
   }
   // 已有独立 bridge 占着端口：绝不能再连一次 SnowLuma，否则同一条 QQ 消息会处理两遍。
   if (consolePortInUse()) {

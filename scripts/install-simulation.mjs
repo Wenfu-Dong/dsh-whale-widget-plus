@@ -262,6 +262,31 @@ section('6. 关键运行文件');
   else ok(`${mustHave.length} 个关键文件齐全`);
 }
 
+// ── 7. 插件激活冒烟（装完能不能真的跑起来 / DSH 升级少了服务会不会炸）──────────
+// 静态 import 遍历只能证明「文件找得到」，证明不了 apply() 跑得完：
+// 2026-11-17 就是在这里抓到 TDZ（const 声明晚于使用）让整个 surfcore 半边
+// 被 try/catch 静默吞掉的。两档能力都跑：当前 DSH + 老版本 DSH。
+section('7. 插件激活冒烟');
+{
+  const runner = path.join(installDir, 'scripts', 'lib', 'activation-smoke.mjs');
+  if (!fs.existsSync(runner)) {
+    fail('发布包缺少 scripts/lib/activation-smoke.mjs —— 激活冒烟无法运行（打包白名单漏了 scripts/lib？）');
+  } else {
+    for (const profile of ['full', 'legacy']) {
+      const result = spawnSync(process.execPath, [runner, installDir, profile], {
+        encoding: 'utf8',
+        timeout: 90_000,
+        env: { ...process.env, DSH_HOME: path.join(tmp, `home-${profile}`) },
+      });
+      if (result.status !== 0) {
+        fail(`激活冒烟失败（${profile}，exit ${result.status}）：${String(result.stdout || result.stderr || '').slice(-800)}`);
+      } else {
+        ok(`激活冒烟通过（${profile}）`);
+      }
+    }
+  }
+}
+
 // ── 收尾 ────────────────────────────────────────────────────────────────────
 function finish() {
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { void 0; }

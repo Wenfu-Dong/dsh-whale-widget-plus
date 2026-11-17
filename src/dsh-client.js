@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import YAML from 'js-yaml';
+import { annotateDshError } from './dsh-protocol.js';
 
 /** DSH home：凭据文件与（历史）启动日志都在这里。 */
 export function resolveDshHome() {
@@ -324,7 +325,13 @@ class ApiClientBase {
       body: JSON.stringify(body),
       ...(requestSignal === undefined ? {} : { signal: requestSignal })
     });
-    if (!response.ok) throw new Error(`transport failure for ${path}: HTTP ${response.status}`);
+    if (!response.ok) {
+      // 附带 path/status，让 404/405 这类「端点没了」的错误能被上层识别成
+      // DSH 协议变化，而不是当成网络抖动无限重试（见 dsh-protocol.js）。
+      throw annotateDshError(new Error(`transport failure for ${path}: HTTP ${response.status}`), {
+        path, httpStatus: response.status,
+      });
+    }
     return response;
   }
 
@@ -721,14 +728,19 @@ export class NodeApiClient extends ApiClientBase {
       method: endpoint,
       payload: wrapArgs(method, payload)
     };
-    this.onEnvelope(message);
-    const response = await this.postJson(`/api/${endpoint}`, message, signal, timeoutPolicy);
-    const full = await response.json();
-    if (!full || full.type !== 'server-response' || full.rpcId !== message.rpcId || !full.result) {
-      throw new Error(`invalid server-response for ${endpoint}`);
+    try {
+      this.onEnvelope(message);
+      const response = await this.postJson(`/api/${endpoint}`, message, signal, timeoutPolicy);
+      const full = await response.json();
+      if (!full || full.type !== 'server-response' || full.rpcId !== message.rpcId || !full.result) {
+        throw new Error(`invalid server-response for ${endpoint}`);
+      }
+      this.onEnvelope(full);
+      return { rpcId: full.rpcId, result: full.result };
+    } catch (error) {
+      // 统一带上方法名并按需追加「协议可能已变化」的提示；不影响调用方原有的 catch 逻辑。
+      throw annotateDshError(error, { method: endpoint });
     }
-    this.onEnvelope(full);
-    return { rpcId: full.rpcId, result: full.result };
   }
 
   /**

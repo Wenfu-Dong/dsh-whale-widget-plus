@@ -999,7 +999,10 @@ export function apply(ctx) {
   characterTimer.unref?.();
 
   // QQ → B站 定时同步（默认关闭；开启后每 30 分钟一次，启动 20 秒后先跑一次）。
-  const startSyncTimer = () => {
+  // 必须是 function 声明而不是 const：它在上面 createConfigRoutes 的注入参数里就被读取
+  // （第 ~478 行），const 在那一刻还处于 TDZ —— 会把整个 surfcore apply 抛成
+  // 「Cannot access 'startSyncTimer' before initialization」，插件看起来装好了却完全不工作。
+  function startSyncTimer() {
     if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
     const unified = readUnified().config;
     if (unified.memory?.qqToBili?.enabled !== true) return;
@@ -1009,7 +1012,7 @@ export function apply(ctx) {
     syncTimer = setInterval(() => {
       try { syncQqToBili(); } catch (error) { pluginLog('定时 QQ→B站 同步失败：', error?.message ?? error); }
     }, Math.max(5 * 60_000, Number(unified.memory?.qqToBili?.intervalMs) || 30 * 60_000));
-  };
+  }
 
   // 扩展框架已移除（2026-11-03）：没有扩展包，也没有 UI 入口。
   function currentDshUrl() {
