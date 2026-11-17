@@ -5738,6 +5738,10 @@ async function main(options = {}) {
     const turnBlocks = [memeWikiBlock, seeMemeBlock].filter(Boolean).join('\n\n');
     const turnText = withAlignmentContext(key, withSlangContext(turnBlocks ? `${turnBlocks}\n\n${promptText}` : promptText, key));
     const content = [{ type: 'text', text: turnText }, ...imageParts];
+    // 媒体解析与视觉识别是 await：这期间可能切模式、暂停或关闭二代仿真。
+    // 入口和 ensureSession 后各查过一次，这里才是真正投递前的最后一刻 —— 少了这一道，
+    // 切到 chat 之后仍会白跑一个 reserved2 回合（发送工具会拒绝，所以只烧 token）。
+    if (wakeBlocked()) return skipWake();
     // 媒体解析成功后再标记退场，避免解析异常时残留退场标记。
     if (!isCurrentSession(key, sessionId)) throw new Error('投递前会话已重置或权限已变化');
     if (opts.farewell) social.exitingSessions.add(sessionId);
@@ -10219,6 +10223,14 @@ async function main(options = {}) {
     };
     // 登记到 globalThis：热重载后的新实例靠它找到并停掉这个旧实例。
     globalThis[BRIDGE_SINGLETON] = embeddedRuntime;
+    // 启动窗口内宿主已要求停用：此刻 runtime 才可用，补做停止（stopEmbedded 已把
+    // 意图登记在 embeddedStopRequested；这里消费掉，避免宿主以为停了实例却活着）。
+    if (embeddedStopRequested) {
+      embeddedStopRequested = false;
+      void embeddedRuntime.stop().catch((error) => {
+        try { log('启动窗口内补做停止失败:', error?.message ?? error); } catch {}
+      });
+    }
   }
 
   await pumpMux();
@@ -10305,6 +10317,10 @@ if (isDirectRun && !EMBEDDED_MODE) {
 // ── 嵌入模式生命周期（DSH 插件宿主使用）─────────────────────────────────────
 let embeddedStarted = false;
 let embeddedStartupError = '';
+// 启动窗口内的停止请求：main() 跑到赋值 embeddedRuntime 之前（最长约 12 秒），
+// stopEmbedded() 看不到 runtime，过去会直接返回「未运行」，但 main() 仍在跑 ——
+// 宿主以为停了、实例却活着（幽灵实例会继续连 SnowLuma 并处理消息）。
+let embeddedStopRequested = false;
 let embeddedExitFlushHooked = false;
 
 export async function startEmbedded({ dshWebUrl = '' } = {}) {
@@ -10321,6 +10337,7 @@ export async function startEmbedded({ dshWebUrl = '' } = {}) {
   // 检查、各自 main() 一遍 —— 两条事件流并行消费同一条 DSH 流。
   embeddedStarted = true;
   embeddedStartupError = '';
+  embeddedStopRequested = false;
   // 嵌入模式**不能**装 installProcessGuards（那些钩子会 process.exit，等于把 DSH 带走），
   // 但「退出前把合并写刷盘」是纯同步写入、不退出进程，必须装：否则 DSH 被关掉时
   // saveSocialV2State 的 300ms 合并窗口里可能还有未落盘的入站缓冲/唤醒计数。
@@ -10368,9 +10385,24 @@ export async function startEmbedded({ dshWebUrl = '' } = {}) {
 }
 
 export async function stopEmbedded() {
-  if (!embeddedRuntime?.stop) return { ok: true, already: true, message: '内嵌桥接未运行' };
+  if (!embeddedRuntime?.stop) {
+    if (!embeddedStarted) return { ok: true, already: true, message: '内嵌桥接未运行' };
+    // 还在启动窗口内：先登记停止意图（main() 完成注册后会立即自停），再等一个
+    // 启动窗口（与 startEmbedded 一致，最多 12 秒）。等到就顺便同步停掉，
+    // 返回结果更真实；等不到也已是「确定会停」，不会再出现幽灵实例。
+    embeddedStopRequested = true;
+    for (let i = 0; i < 24; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      if (embeddedRuntime?.stop) break;
+      if (!embeddedStarted) break;
+    }
+    if (!embeddedRuntime?.stop) {
+      return { ok: true, deferred: true, message: '内嵌桥接仍在启动，已登记停止请求（启动完成后立即停止）' };
+    }
+  }
   const result = await embeddedRuntime.stop();
   embeddedStarted = false;
+  embeddedStopRequested = false;
   return result;
 }
 

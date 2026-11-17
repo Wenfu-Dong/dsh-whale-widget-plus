@@ -194,3 +194,47 @@ test('快照裁剪：长数组按上限截断，保持文件大小有界', () =>
   assert.equal(conv.seenForwardIds.length, 1000);
   assert.equal(snap.paused, false);
 });
+
+test('快照：长期无活动的会话不落盘（TTL 可配置，0 关闭）', () => {
+  const now = Date.now();
+  const buildWith = (ttlDays) => {
+    const { deps } = makeDeps({
+      readJsonSafe: () => null,
+      getConfig: () => ({ socialV2: { closure: {}, context: { conversationTtlDays: ttlDays } } }),
+    });
+    const store = createSocialV2Store(deps);
+    const stub = (lastIncomingAt) => ({
+      wakeConfig: { triggers: {} }, recentMessages: [], unread: [],
+      wakeTimes: [], sendTimes: [], stickerCollectTimes: [],
+      activeTopics: [], pendingThoughts: [], fishGuardLog: [],
+      lastIncomingAt, lastAiReplyAt: 0, lastActionAt: 0, agentToken: 't', bootstrapSent: false,
+    });
+    deps.socialV2.conversations.set('group:old', stub(now - 40 * 86_400_000));
+    deps.socialV2.conversations.set('group:new', stub(now - 1000));
+    deps.socialV2.conversations.set('group:unknown', stub(0));
+    return store.buildSnapshot();
+  };
+
+  const snap = buildWith(30);
+  assert.equal(snap.conversations['group:old'], undefined, '40 天无活动应被跳过');
+  assert.ok(snap.conversations['group:new'], '有近期活动的会话必须保留');
+  assert.ok(snap.conversations['group:unknown'], '无时间戳的旧数据要保留，避免升级误删');
+  assert.ok(buildWith(0).conversations['group:old'], 'TTL=0 应关闭淘汰');
+});
+
+test('加载：文件存在但解析失败时先备份现场，避免被空状态覆盖', () => {
+  const renamed = [];
+  const { deps } = makeDeps({
+    readJsonSafe: () => null,
+    fs: {
+      statSync: () => ({ size: 32, mtimeMs: 1 }),
+      renameSync: (from, to) => { renamed.push([from, to]); },
+    },
+  });
+  const store = createSocialV2Store(deps);
+
+  assert.doesNotThrow(() => store.loadState());
+  assert.equal(renamed.length, 1, '损坏文件应被改名备份');
+  assert.equal(renamed[0][0], deps.SOCIAL_V2_FILE);
+  assert.match(renamed[0][1], /social-v2\.json\.corrupt-\d+$/);
+});

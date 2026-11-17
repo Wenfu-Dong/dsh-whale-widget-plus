@@ -39,7 +39,24 @@ export function createSocialV2Store(deps) {
   /** 把内存态压成可落盘的对象（各数组按上限截断，避免状态文件无限增长）。 */
   function buildSnapshot() {
     const obj = { paused: socialV2.paused, conversations: Object.create(null) };
+    // 会话级淘汰：机器人待过的每个群/私聊此前都会永久保留，快照又是全量重写 ——
+    // 长期在多群使用后文件体积与每次写盘耗时线性增长。这里跳过长期无活动的会话
+    // （内存态仍在，重启后该 key 会按默认配置重建；用户可在配置里调整或设为 0 关闭）。
+    const cfg = getConfig();
+    const ttlDays = Number(cfg.socialV2?.context?.conversationTtlDays);
+    const ttlDisabled = ttlDays === 0;
+    const ttlMs = (Number.isFinite(ttlDays) && ttlDays > 0 ? ttlDays : 30) * 86_400_000;
+    const now = Date.now();
     for (const [key, st] of socialV2.conversations) {
+      // 从未有过活动记录的旧数据（时间戳全 0）一律保留，避免升级时误删。
+      const lastActive = Math.max(
+        Number(st.lastIncomingAt) || 0,
+        Number(st.lastAiReplyAt) || 0,
+        Number(st.lastActionAt) || 0,
+        Number(st.lastHistoryCheckedAt) || 0,
+        Number(st.lastSendFailureAt) || 0
+      );
+      if (!ttlDisabled && lastActive > 0 && now - lastActive > ttlMs) continue;
       obj.conversations[key] = {
         wakeConfig: st.wakeConfig,
         recentMessages: st.recentMessages.slice(-200),
@@ -129,7 +146,19 @@ export function createSocialV2Store(deps) {
       // 这不是假想：日志里出现过两个桥接实例同时启动，第二个实例在加载后立刻回写，
       // 把第一个实例刚更新的读水位/唤醒时间/转发 id 全部退回旧值。
       const beforeStamp = fileStamp();
-      const raw = readJsonSafe(SOCIAL_V2_FILE, null);
+      let raw = readJsonSafe(SOCIAL_V2_FILE, null);
+      // 文件存在但解析失败：先备份现场，再做任何后续写入。否则下一次合并写会用
+      // 空/默认状态把损坏文件覆盖掉，用户连人工抢救原始内容的机会都没有。
+      // 空文件（size 0）是首次启动的正常形态，不备份。
+      if (raw === null) {
+        try {
+          if (fs.statSync(SOCIAL_V2_FILE).size > 0) {
+            const backup = `${SOCIAL_V2_FILE}.corrupt-${Date.now()}`;
+            fs.renameSync(SOCIAL_V2_FILE, backup);
+            log(`⚠️ state/social-v2.json 解析失败，已备份为 ${backup.slice(SOCIAL_V2_FILE.length + 1)}，本次从空状态开始`);
+          }
+        } catch {}
+      }
       socialV2.paused = raw?.paused === true;
       if (raw && typeof raw.conversations === 'object') {
         const seenTokens = new Set();

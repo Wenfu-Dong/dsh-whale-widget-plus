@@ -18,6 +18,7 @@
  * @param {object} options
  * @param {() => (boolean|void)} options.write   真正的同步落盘函数；返回 false 或抛错视为失败
  * @param {number} [options.coalesceMs]          合并窗口（默认 300ms）
+ * @param {number} [options.retryDelayMs]        写失败后的重试基准间隔（默认 max(合并窗口, 1s)）
  * @param {(message:string, error?:unknown) => void} [options.log]
  * @param {Function} [options.setTimeoutImpl]    便于单测注入假定时器
  * @param {Function} [options.clearTimeoutImpl]
@@ -25,6 +26,7 @@
 export function createCoalescingWriter({
   write,
   coalesceMs = 300,
+  retryDelayMs,
   log = () => {},
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,
@@ -36,6 +38,24 @@ export function createCoalescingWriter({
   let pending = false;
   let writeCount = 0;
   let failureCount = 0;
+  // 写失败后的有限重试：Windows 上杀软/搜索索引会短暂占用目标文件，rename 失败是
+  // 真实会发生的瞬时故障。失败后若只是返回 false，这批改动要等下一次 schedule()
+  // 才会再写 —— 停机前的那一次 flush 失败就等于永久丢数据。
+  const MAX_WRITE_RETRIES = 3;
+  const retryDelay = Number(retryDelayMs) > 0 ? Number(retryDelayMs) : Math.max(delay, 1000);
+  let retryTimer = null;
+  let retryCount = 0;
+
+  function armRetry() {
+    if (retryCount >= MAX_WRITE_RETRIES) return false;
+    retryCount += 1;
+    retryTimer = setTimeoutImpl(() => {
+      retryTimer = null;
+      flush();
+    }, retryDelay * retryCount);
+    if (retryTimer && typeof retryTimer.unref === 'function') retryTimer.unref();
+    return true;
+  }
 
   /** 立即落盘（幂等：没有待写内容也允许调用，用于「必须确认已经落盘」的语义点）。 */
   function flush() {
@@ -43,14 +63,23 @@ export function createCoalescingWriter({
       clearTimeoutImpl(timer);
       timer = null;
     }
+    if (retryTimer) {
+      clearTimeoutImpl(retryTimer);
+      retryTimer = null;
+    }
     pending = false;
     writeCount += 1;
     try {
       const result = write();
-      return result !== false;
+      if (result === false) throw new Error('write() 返回 false');
+      retryCount = 0;
+      return true;
     } catch (error) {
       failureCount += 1;
-      try { log('合并落盘失败', error); } catch {}
+      // 这次写没有生效：恢复脏标记，否则这批状态只能等下一次 schedule() 才有机会落盘。
+      pending = true;
+      const retried = armRetry();
+      try { log(retried ? '合并落盘失败，已安排重试' : '合并落盘失败，重试次数已用尽', error); } catch {}
       return false;
     }
   }
@@ -79,6 +108,11 @@ export function createCoalescingWriter({
       clearTimeoutImpl(timer);
       timer = null;
     }
+    if (retryTimer) {
+      clearTimeoutImpl(retryTimer);
+      retryTimer = null;
+    }
+    retryCount = 0;
     const had = pending;
     pending = false;
     return had;
@@ -89,8 +123,11 @@ export function createCoalescingWriter({
     flush,
     cancel,
     get pending() { return pending; },
-    get scheduled() { return timer !== null; },
+    get scheduled() { return timer !== null || retryTimer !== null; },
     get coalesceMs() { return delay; },
-    stats: () => ({ writeCount, failureCount, pending, scheduled: timer !== null, coalesceMs: delay }),
+    stats: () => ({
+      writeCount, failureCount, retryCount, pending,
+      scheduled: timer !== null || retryTimer !== null, coalesceMs: delay,
+    }),
   };
 }
