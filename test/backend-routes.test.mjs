@@ -15,6 +15,13 @@ import { createPetPurposeRoutes } from '../backend/lib/routes/pet-purpose.js';
 import { createDouyinRoutes } from '../backend/lib/routes/douyin.js';
 import { createConfigRoutes } from '../backend/lib/routes/config.js';
 import { createCharacterRoutes } from '../backend/lib/routes/characters.js';
+import { createMemoryRoutes } from '../backend/lib/routes/memory.js';
+import { createDiagnosticsRoutes } from '../backend/lib/routes/diagnostics.js';
+import { createSnowLumaRoutes } from '../backend/lib/routes/snowluma.js';
+import { createConsoleExtrasRoutes } from '../backend/lib/routes/console-extras.js';
+import { createModuleRoutes } from '../backend/lib/routes/modules.js';
+import { createBiliTiebaRoutes } from '../backend/lib/routes/bili-tieba.js';
+import { createPlatformRoutes } from '../backend/lib/routes/platforms.js';
 
 function makeRes() {
   const out = { status: 0, body: null };
@@ -80,6 +87,13 @@ test('路由工厂缺少依赖时构造即失败', () => {
   assert.throws(() => createDouyinRoutes({}), /douyin-routes 缺少依赖/);
   assert.throws(() => createConfigRoutes({}), /config-routes 缺少依赖/);
   assert.throws(() => createCharacterRoutes({}), /character-routes 缺少依赖/);
+  assert.throws(() => createMemoryRoutes({}), /memory-routes 缺少依赖/);
+  assert.throws(() => createDiagnosticsRoutes({}), /diagnostics-routes 缺少依赖/);
+  assert.throws(() => createSnowLumaRoutes({}), /snowluma-routes 缺少依赖/);
+  assert.throws(() => createConsoleExtrasRoutes({}), /console-extras-routes 缺少依赖/);
+  assert.throws(() => createModuleRoutes({}), /module-routes 缺少依赖/);
+  assert.throws(() => createBiliTiebaRoutes({}), /bili-tieba-routes 缺少依赖/);
+  assert.throws(() => createPlatformRoutes({}), /platform-routes 缺少依赖/);
 });
 
 test('GET /persona 返回分层内容，日常层自动补身份行', async () => {
@@ -426,5 +440,436 @@ test('角色路由：回档按序停桥、回滚、重启并恢复生物钟', as
   const order = calls.filter((item) => typeof item === 'string');
   assert.deepEqual(order, ['memoryIdle', 'resetIdle', 'stopSessions', 'stopBridge', 'pointer', 'archive', 'startBridge', 'startScheduler']);
   assert.deepEqual(calls.filter((item) => Array.isArray(item)), [['prepare', false], ['restore', 'c1', 'slot-a']]);
+});
+
+function makeMemoryDeps(overrides = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-dfy-memory-'));
+  const stateDir = path.join(dir, 'state');
+  fs.mkdirSync(stateDir, { recursive: true });
+  const paths = {
+    qqForBili: path.join(dir, 'qq-for-bili.md'),
+    inbox: path.join(dir, 'inbox.jsonl'),
+    dir,
+  };
+  const calls = [];
+  let saved = null;
+  const deps = {
+    PRIVACY_POLICY_VERSION: 'v1',
+    readJsonBody: async (req) => req.body ?? {},
+    json: null,
+    readUnified: () => ({ config: { memoryCard: { organize: {} } } }),
+    saveUnified: (patch) => { saved = patch; },
+    maskPath: (value) => String(value),
+    backupFile: (file, label) => { calls.push(['backup', file, label]); return `${file}.bak`; },
+    QQ_STATE_DIR: () => stateDir,
+    activeMemoryPaths: () => paths,
+    readTextFile: () => '',
+    QQ_ALIGNMENT_BRIEF: path.join(dir, 'qq-align.md'),
+    BILI_ALIGNMENT_FILE: path.join(dir, 'bili-align.md'),
+    platforms: { list: () => [] },
+    memoryOrganizer: {
+      llmReady: () => true,
+      organize: async () => ({ ok: true }),
+      diary: async () => ({ ok: true }),
+    },
+    callBridge: async () => ({ ok: true }),
+    memoryStatus: () => ({ ok: true }),
+    previewQqForBili: () => '预览',
+    biliToQqStatus: () => ({ briefPreview: 'B站预览' }),
+    auditTail: () => [],
+    syncQqToBili: () => ({ ok: true }),
+    refreshBiliToQq: async () => ({ ok: true }),
+    scanQqFeedForCandidates: () => ({ candidates: 1 }),
+    scanBiliFeedForCandidates: async () => ({ candidates: 2 }),
+    rebuildAllPrompts: () => ({ rebuilt: true }),
+    memoryCardSnapshot: () => ({ records: [], status: { percent: 0 } }),
+    fullMemoryCardSnapshot: () => ({ records: [] }),
+    applyMemoryCardAction: async () => ({ ok: true }),
+    runMemoryCardMaintenance: async () => ({ changed: 0 }),
+    compactMemoryCardNow: async () => ({ steps: [] }),
+    restoreMemoryCardBackup: async () => ({ ok: true }),
+    notifyOwnerIfNeeded: async () => ({ ok: true }),
+    listLinks: () => [],
+    listCandidates: () => [],
+    addLink: (link) => link,
+    updateLink: (id, patch) => ({ id, ...patch }),
+    removeLink: () => ({ removed: true }),
+    approveCandidate: () => ({}),
+    rejectCandidate: () => ({}),
+    importAlignments: () => ({}),
+    exportAlignments: () => ({}),
+    alignStats: () => ({}),
+    ...overrides,
+  };
+  return { deps, dir, stateDir, paths, calls, getSaved: () => saved };
+}
+
+test('记忆路由：GET 汇总、清空只删 feed/记忆/同步状态并先备份', async () => {
+  const { deps, stateDir, paths, calls } = makeMemoryDeps();
+  const { out, json } = makeRes();
+  const routes = createMemoryRoutes({ ...deps, json });
+
+  await routes.handleMemory({ method: 'GET' }, {}, new URL('http://127.0.0.1/api/memory?chars=500'));
+  assert.equal(out.status, 200);
+  assert.equal(out.body.qqPreview, '预览');
+  assert.equal(out.body.biliPreview, 'B站预览');
+
+  const feed = path.join(stateDir, 'qq-public-feed.jsonl');
+  fs.writeFileSync(feed, '{}\n');
+  fs.writeFileSync(paths.qqForBili, '记忆');
+  fs.writeFileSync(path.join(paths.dir, 'sync-state.json'), '{}');
+  await routes.handleMemory({ method: 'POST', body: { action: 'purge' } }, {}, new URL('http://127.0.0.1/api/memory'));
+  assert.equal(out.status, 200);
+  assert.equal(calls[0][0], 'backup');
+  for (const file of [feed, paths.qqForBili, path.join(paths.dir, 'sync-state.json')]) {
+    assert.equal(fs.existsSync(file), false, `未删除：${file}`);
+  }
+});
+
+test('记忆卡路由：整理开关夹取范围，未知动作 400', async () => {
+  const { deps, getSaved } = makeMemoryDeps();
+  const { out, json } = makeRes();
+  const routes = createMemoryRoutes({ ...deps, json });
+
+  await routes.handleMemoryCard(
+    { method: 'POST', body: { action: 'organize-config', enabled: true, diary: true, intervalHours: 999, minRecords: 0 } },
+    {},
+    new URL('http://127.0.0.1/api/memory-card'),
+  );
+  assert.equal(out.status, 200);
+  assert.deepEqual(getSaved(), { memoryCard: { organize: { enabled: true, diary: true, intervalHours: 168, minRecords: 10 } } });
+
+  await routes.handleMemoryCard({ method: 'POST', body: { action: 'nope' } }, {}, new URL('http://127.0.0.1/api/memory-card'));
+  assert.equal(out.status, 400);
+
+  await routes.handleMemoryCardFull({ method: 'GET' }, {}, new URL('http://127.0.0.1/api/memory-card/full?limit=999'));
+  assert.equal(out.status, 200);
+});
+
+test('对齐路由：GET 带 briefs，scan 同时扫描两端', async () => {
+  const { deps } = makeMemoryDeps();
+  const { out, json } = makeRes();
+  const routes = createMemoryRoutes({ ...deps, json });
+
+  await routes.handleAlign({ method: 'GET' }, {});
+  assert.equal(out.status, 200);
+  assert.deepEqual(out.body.briefs, { qqChars: 0, biliChars: 0 });
+
+  await routes.handleAlign({ method: 'POST', body: { action: 'scan' } }, {});
+  assert.deepEqual(out.body.qq, { candidates: 1 });
+  assert.deepEqual(out.body.bili, { candidates: 2 });
+});
+
+function makeDiagnosticsDeps(overrides = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-dfy-diag-'));
+  const calls = [];
+  let savedMode = null;
+  let savedOwner = null;
+  let settingsUpdate = null;
+  const deps = {
+    getSettings: () => ({
+      describe: () => [{ ns: 'qq-mode', value: { mode: 'chat' } }],
+      update: async (ns, value) => { settingsUpdate = { ns, value }; },
+    }),
+    parseModeState: () => ({ localMode: 'chat', localRole: null }),
+    readJsonBody: async (req) => req.body ?? {},
+    json: null,
+    pluginLog: () => {},
+    readJson: () => ({}),
+    writeJsonAtomic: (file, value) => { savedMode = { file, value }; },
+    QQ_STATE_DIR: () => path.join(dir, 'qq-state'),
+    readQqConfig: () => ({ config: { allow: {} } }),
+    saveQqConfig: (patch) => { calls.push(['qq', patch]); return { config: patch }; },
+    readUnified: () => ({ hasUserFile: true, config: {} }),
+    saveUnified: (patch) => { savedOwner = patch; calls.push(['unified', patch]); },
+    readAll: () => ({ unified: { admin: { qq: '10001' }, memory: {} } }),
+    callBridge: async () => ({ ok: true }),
+    pathSummary: () => ({}),
+    backupFile: (file, label) => { calls.push(['backup', label]); return `${file}.bak`; },
+    safeBackupName: (name) => String(name ?? ''),
+    maskPath: (value) => String(value),
+    resolvePersonaFile: () => path.join(dir, 'persona.md'),
+    activeMemoryPaths: () => ({ qqForBili: path.join(dir, 'qq-for-bili.md') }),
+    STATE_DIR: path.join(dir, 'state'),
+    QQBOT_ROOT: dir,
+    DSH_HOME: dir,
+    UNIFIED_FILE: path.join(dir, 'unified.json'),
+    BILI_MJS: path.join(dir, 'bili.mjs'),
+    BILI_CONFIG: path.join(dir, 'bili.json'),
+    BILI_CRED: path.join(dir, 'cred.json'),
+    QQ_CONFIG: path.join(dir, 'qq.json'),
+    ALIGN_FILE: path.join(dir, 'align.json'),
+    QQ_ALIGNMENT_BRIEF: path.join(dir, 'qq-align.md'),
+    BILI_ALIGNMENT_FILE: path.join(dir, 'bili-align.md'),
+    BACKUP_DIR: path.join(dir, 'backups'),
+    bridgeStatus: async () => ({ running: true, port: 1 }),
+    astrbotSupervisor: { status: async () => ({ running: true, port: 6199 }) },
+    astrbotApi: { listPlugins: async () => [], isQqConnected: async () => true, getRouteB: () => ({ on: false, apiBase: '' }) },
+    portOpen: async () => true,
+    currentDshUrl: () => 'http://127.0.0.1:1234',
+    discoverSnowLumaConnection: async () => ({ ok: false }),
+    diagnoseSnowLuma: async () => ({ state: 'unknown' }),
+    buildInstallChecks: () => [{ name: 'QQ 桥接源码', ok: true }],
+    installOk: () => true,
+    planDoctorFix: () => ['生成统一配置', '生成控制台令牌'],
+    normalizeAllowlist: ({ allow }) => ({ allow, warnings: [] }),
+    startBridge: async () => ({ ok: true }),
+    ...overrides,
+  };
+  return { deps, dir, calls, getMode: () => savedMode, getOwner: () => savedOwner, getSettingsUpdate: () => settingsUpdate };
+}
+
+test('模式路由：GET 读本地与 DSH 设置，POST 同步 mode.json 与 qq-mode', async () => {
+  const { deps, calls, getMode, getSettingsUpdate } = makeDiagnosticsDeps();
+  const { out, json } = makeRes();
+  const routes = createDiagnosticsRoutes({ ...deps, json });
+
+  await routes.handleMode({ method: 'GET' }, {});
+  assert.equal(out.body.localMode, 'chat');
+  assert.deepEqual(out.body.dshSetting, { mode: 'chat' });
+
+  await routes.handleMode({ method: 'POST', body: { mode: 'reserved', ownerQQ: '10002' } }, {});
+  assert.equal(out.status, 200);
+  assert.deepEqual(getMode().value, { mode: 'reserved' });
+  const qqSave = calls.find(([kind]) => kind === 'qq');
+  assert.equal(qqSave[1].ownerQQ, '10002');
+  assert.deepEqual(getSettingsUpdate(), { ns: 'qq-mode', value: { mode: 'reserved', ownerQQ: '10002' } });
+});
+
+test('诊断路由：doctor-fix 只补缺失项，backup 逐项落备份', async () => {
+  const { deps, calls } = makeDiagnosticsDeps();
+  const { out, json } = makeRes();
+  const routes = createDiagnosticsRoutes({ ...deps, json });
+
+  await routes.handleDiagnostics({ method: 'POST', body: { action: 'doctor-fix', ownerQQ: '10001' } }, {});
+  assert.equal(out.status, 200);
+  assert.deepEqual(out.body.changed, ['生成统一配置', '生成控制台令牌']);
+  assert.ok(calls.some(([kind, patch]) => kind === 'qq' && patch.consoleToken));
+
+  calls.length = 0;
+  await routes.handleDiagnostics({ method: 'POST', body: { action: 'backup' } }, {});
+  assert.equal(out.body.created.length, 8);
+  assert.equal(calls.filter(([kind]) => kind === 'backup').length, 8);
+});
+
+test('SnowLuma：未开启允许打开时只返回可执行错误，不启动进程', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-dfy-snow-'));
+  const stateWrites = [];
+  const routes = createSnowLumaRoutes({
+    readQqConfig: () => ({ config: { snowluma: { allowLaunch: false } } }),
+    saveQqConfig: () => ({}),
+    readUnified: () => ({ config: {} }),
+    readJsonBody: async (req) => req.body ?? {},
+    json: () => {},
+    pluginLog: () => {},
+    QQBOT_ROOT: dir,
+    STATE_DIR: dir,
+    writeFileAtomic: () => {},
+    writeJsonAtomic: (file, value) => stateWrites.push({ file, value }),
+    bridgeStatus: async () => ({ running: false }),
+    currentDshUrl: () => 'http://127.0.0.1:1234',
+    getSchedulerRunning: () => false,
+  });
+  const result = await routes.launchSnowLuma();
+  assert.equal(result.ok, false);
+  assert.match(result.error, /未开启/);
+  assert.equal(stateWrites.length, 2);
+  assert.equal(stateWrites[1].value.phase, 'done');
+});
+
+test('外围接口：缺少 DeepSeek key 时直接给出排查提示', async () => {
+  const { out, json } = makeRes();
+  const routes = createConsoleExtrasRoutes({
+    json,
+    readJsonBody: async (req) => req.body ?? {},
+    readQqConfig: () => ({ config: {} }),
+    readAsrSettings: () => ({ apiKey: '', keySource: 'none' }),
+    httpRequest: async () => { throw new Error('不该发起请求'); },
+    consoleBase: () => 'http://127.0.0.1:3100',
+    consoleToken: () => 't',
+  });
+  await routes.handleDeepseekStatus({ method: 'GET' }, {});
+  assert.equal(out.status, 200);
+  assert.equal(out.body.hasKey, false);
+  assert.match(out.body.hint, /读不到 DeepSeek key/);
+});
+
+test('模块路由：停用 QQ/抖音会停对应运行时，未知模块 400', async () => {
+  const calls = [];
+  let saved = null;
+  const modules = [{ id: 'qq' }, { id: 'douyin' }];
+  const { out, json } = makeRes();
+  const routes = createModuleRoutes({
+    capabilityRegistry: { snapshot: () => ({}), switchTo: async () => ({}), runContract: async () => ({}), resetStats: () => ({}) },
+    moduleList: () => modules,
+    readUnified: () => ({ config: {} }),
+    saveUnified: (patch) => { saved = patch; },
+    readJsonBody: async (req) => req.body ?? {},
+    json,
+    douyinStop: async () => { calls.push('douyinStop'); },
+    stopBridge: async () => { calls.push('stopBridge'); },
+    pluginLog: () => {},
+  });
+
+  await routes.handleModules({ method: 'POST', body: { id: 'nope', enabled: false } }, {});
+  assert.equal(out.status, 400);
+
+  await routes.handleModules({ method: 'POST', body: { id: 'qq', enabled: false } }, {});
+  assert.deepEqual(saved, { modules: { qq: false } });
+  await routes.handleModules({ method: 'POST', body: { id: 'douyin', enabled: false } }, {});
+  assert.deepEqual(calls, ['stopBridge', 'douyinStop']);
+});
+
+function makeBiliTiebaDeps(overrides = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-dfy-bili-'));
+  const deps = {
+    getCtx: () => ({ sessionController: {}, sessions: {} }),
+    getScheduler: () => null,
+    isSchedulerRunning: () => false,
+    readJson: (file, fallback) => fallback,
+    readJsonBody: async (req) => req.body ?? {},
+    json: null,
+    pluginLog: () => {},
+    maskPath: (value) => String(value),
+    writeJsonAtomic: () => {},
+    readQqConfig: () => ({ config: {} }),
+    QQ_STATE_DIR: () => path.join(dir, 'qq-state'),
+    readBiliConfig: () => ({ config: { self: { mid: '100', name: '鱼' }, owner: { mid: '', name: '' } } }),
+    saveBiliConfig: () => ({}),
+    BILI_MJS: path.join(dir, 'bili.mjs'),
+    BILI_TOOLS_DIR: dir,
+    BILI_CRED: path.join(dir, 'credentials.json'),
+    BILI_AI_DIR: dir,
+    BILI_DIR: dir,
+    BACKUP_DIR: path.join(dir, 'backups'),
+    ALIGN_FILE: path.join(dir, 'align.json'),
+    activePlatformStateDir: () => dir,
+    readCurrentCharacter: () => ({ id: 'c1', name: '角色', epoch: 1 }),
+    readWatchHistory: () => ({ items: [{ bvid: 'BV1' }], total: 1 }),
+    enrichWatchHistory: (items) => ({ items: items.map((item) => ({ ...item, acted: true })), actions: ['comment'] }),
+    scanPreferences: async () => ({ ok: true, words: [] }),
+    fishGuardStateSummary: () => ({ recent: [] }),
+    summarizeQqFishGuard: () => ({ triggers: 0 }),
+    automationSnapshot: () => ({ enabled: false }),
+    callBridge: async () => ({ ok: true }),
+    findNodeExe: () => 'node',
+    applySessionPermission: () => ({ ok: true }),
+    biliCookieHeader: () => '',
+    readFishAccount: () => ({ configured: true, mid: '', name: '' }),
+    readOwnerAccount: () => ({ mid: '200', name: '主人' }),
+    pollQrLogin: async () => ({ ok: true }),
+    startQrLogin: async () => ({ id: 'qr' }),
+    cancelQrLogin: () => {},
+    verifyStoredCredentials: async () => ({ ok: true }),
+    saveTiebaCookieLogin: async () => ({ ok: true }),
+    markTiebaVerified: () => {},
+    verifyStoredTiebaCredentials: async () => ({ ok: true }),
+    readTiebaViewHistory: () => ({ items: [] }),
+    tiebaStatus: () => ({ ok: true, loggedIn: false }),
+    tiebaAction: async () => ({ done: true }),
+    clearTiebaCredentials: () => {},
+    startTiebaQrLogin: async () => ({ id: 'tieba_qr_x' }),
+    pollTiebaQrLogin: async () => ({ status: 'waiting' }),
+    cancelTiebaQrLogin: () => {},
+    ...overrides,
+  };
+  return { deps, dir };
+}
+
+test('B站/贴吧：观看历史补动作、账号回落配置、贴吧 GET 状态', async () => {
+  const { deps } = makeBiliTiebaDeps();
+  const { out, json } = makeRes();
+  const routes = createBiliTiebaRoutes({ ...deps, json });
+
+  routes.handleWatchHistory({}, new URL('http://127.0.0.1/bili/watch-history?limit=10'));
+  assert.equal(out.body.items[0].acted, true);
+  assert.deepEqual(out.body.actions, ['comment']);
+
+  await routes.handleBili({ method: 'GET' }, {}, new URL('http://127.0.0.1/bili/accounts'));
+  assert.equal(out.body.fish.mid, '100');
+  assert.equal(out.body.fish.name, '鱼');
+  assert.equal(out.body.owner.mid, '200');
+
+  await routes.handleTieba({ method: 'GET' }, {}, new URL('http://127.0.0.1/tieba/status'));
+  assert.equal(out.body.loggedIn, false);
+});
+
+test('贴吧：生物钟未运行时 heartbeat-now 返回 400 与可执行提示', async () => {
+  const { deps } = makeBiliTiebaDeps();
+  const { out, json } = makeRes();
+  const routes = createBiliTiebaRoutes({ ...deps, json });
+
+  await routes.handleTieba(
+    { method: 'POST', body: { action: 'heartbeat-now' } },
+    {},
+    new URL('http://127.0.0.1/tieba/heartbeat-now'),
+  );
+  assert.equal(out.status, 400);
+  assert.match(out.body.error, /生物钟没在运行/);
+});
+
+function makePlatformDeps(overrides = {}) {
+  const calls = [];
+  let saved = null;
+  const deps = {
+    platforms: { statusAll: async () => ({ qq: 'ok' }) },
+    platformHub: { snapshot: async () => ({ plugins: [] }) },
+    astrbotSupervisor: { status: async () => ({ running: true }) },
+    getLlmService: () => ({
+      listProviders: () => [{ id: 'p1', name: '提供商1' }],
+      listModels: async () => [{ id: 'm1', name: '模型1' }],
+    }),
+    getDefaultModelService: () => ({ currentSelection: () => ({ provider: 'p1', model: 'm1' }), saveSelection: async () => {} }),
+    readUnified: () => ({ config: { model: { provider: '', model: '' } } }),
+    saveUnified: (patch) => { saved = payloadMerge(saved, patch); calls.push(['saveUnified', patch]); },
+    readQqConfig: () => ({ config: {} }),
+    saveQqConfig: (patch) => { calls.push(['saveQqConfig', patch]); return { config: patch }; },
+    readJsonBody: async (req) => req.body ?? {},
+    json: null,
+    pluginLog: () => {},
+    updates: { status: () => ({ items: [] }), check: async () => ({ ok: true }), apply: async () => ({ ok: true }), rollback: async () => ({ ok: true }), dismiss: () => ({}), resetDismissed: () => ({}) },
+    tokenBudget: {
+      budgetFile: 'budget.json',
+      status: async () => ({ ok: true }),
+      resetLimits: () => calls.push('resetLimits'),
+      addLimit: () => calls.push('addLimit'),
+      saveLimits: () => calls.push('saveLimits'),
+    },
+    backupFile: (file, label) => { calls.push(['backup', label]); return `${file}.bak`; },
+    ...overrides,
+  };
+  return { deps, calls, getSaved: () => saved };
+}
+
+function payloadMerge(current, patch) {
+  return { ...(current ?? {}), ...(patch ?? {}) };
+}
+
+test('平台路由：平台状态透传，模型保存同步 QQ 与 DSH 默认', async () => {
+  const { deps, calls } = makePlatformDeps();
+  const { out, json } = makeRes();
+  const routes = createPlatformRoutes({ ...deps, json });
+
+  await routes.handlePlatforms({ method: 'GET' }, {});
+  assert.deepEqual(out.body.platforms, { qq: 'ok' });
+
+  await routes.handleModels({ method: 'POST', body: { provider: 'p1', model: 'm1' } }, {});
+  assert.equal(out.body.defaultSaved, true);
+  assert.ok(calls.some(([kind]) => kind === 'saveUnified'));
+  assert.ok(calls.some(([kind, patch]) => kind === 'saveQqConfig' && patch.dsh.model === 'm1'));
+});
+
+test('额度路由：保存前先备份，缺字段返回 400', async () => {
+  const { deps, calls } = makePlatformDeps();
+  const { out, json } = makeRes();
+  const routes = createPlatformRoutes({ ...deps, json });
+
+  await routes.handleTokenBudget({ method: 'POST', body: { limits: { daily: 100 } } }, {}, new URL('http://127.0.0.1/token-budget'));
+  assert.equal(out.status, 200);
+  assert.deepEqual(calls[0], ['backup', 'token-budget-before-save']);
+  assert.ok(calls.includes('saveLimits'));
+
+  await routes.handleTokenBudget({ method: 'POST', body: {} }, {}, new URL('http://127.0.0.1/token-budget'));
+  assert.equal(out.status, 400);
 });
 

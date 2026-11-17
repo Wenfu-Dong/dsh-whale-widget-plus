@@ -13,6 +13,10 @@ import {
 import { createRoleAudioStore } from './role-audio-store.mjs'
 import { createAboutPanel } from './about-panel.mjs'
 import { createUsageSettingsRoute, createApiModelsRoute } from './usage-api-routes.mjs'
+import { createWhaleAssetsRoutes } from './whale-assets-routes.mjs'
+import { createWhaleAccountingRoutes } from './whale-accounting-routes.mjs'
+import { createWhaleRolesAudioRoutes } from './whale-roles-audio-routes.mjs'
+import { createWhaleMiscRoutes } from './whale-misc-routes.mjs'
 
 // Node 的 fetch(undici) 可能优先 IPv6：个别域名(如 open.bigmodel.cn)有 AAAA 记录但本机 IPv6 不通，
 // 会直接报 "fetch failed"（curl 会自动回退 IPv4，所以看起来正常）。统一改为 IPv4 优先。
@@ -32,6 +36,8 @@ const IMAGE_CANDIDATES = [
   path.join(PACKAGE_ROOT, 'assets', 'DSniang1.png'),
   path.join(PACKAGE_ROOT, 'assets', 'DSniang02.png'),
 ]
+// 桌宠动画素材目录（路由实现见 whale-assets-routes.mjs）
+const PET_VIDEO_DIR = path.join(PACKAGE_ROOT, 'assets', 'pet-video')
 // 自定义角色图片存放目录（第一个可写的会被使用；roles.json 存角色元数据）
 // ⭐ 2026-10-02（用户要求"并成一份"）：**用户数据的候选表一律 $DSH_HOME 优先**，开发机路径降级为兜底。
 //   原因：桌面客户端加载的是 strip 过的发布副本（只认 $DSH_HOME），而开发版宿主原先把开发机路径排在第一位
@@ -595,16 +601,6 @@ function bubbleImgFileCandidates(file) {
     path.join(PACKAGE_ROOT, 'assets', file),
   ]
 }
-function loadBuiltinBubbleImgBytes(def) {
-  if (!def || !def.file) return null
-  for (const p of bubbleImgFileCandidates(def.file)) {
-    try {
-      const bytes = fs.readFileSync(p)
-      if (bytes && bytes.length > 0) return bytes
-    } catch (err) {}
-  }
-  return null
-}
 const SOUND_SETS = {
   duck: { press: [path.join(PACKAGE_ROOT, 'assets', 'Ya1.mp3')], release: [path.join(PACKAGE_ROOT, 'assets', 'Ya2.mp3')] },
   fx1: { press: [path.join(PACKAGE_ROOT, 'assets', 'D1.mp3')], release: [path.join(PACKAGE_ROOT, 'assets', 'D2.mp3')] },
@@ -613,13 +609,6 @@ const SOUND_SETS = {
   voice_heng: { press: [path.join(PACKAGE_ROOT, 'assets', 'voice-heng.mp3')], release: [path.join(PACKAGE_ROOT, 'assets', 'voice-heng.mp3')] },
   voice_qtan: { press: [path.join(PACKAGE_ROOT, 'assets', 'voice-qtan.mp3')], release: [path.join(PACKAGE_ROOT, 'assets', 'voice-qtan.mp3')] },
   voice_weiqu: { press: [path.join(PACKAGE_ROOT, 'assets', 'voice-weiqu.mp3')], release: [path.join(PACKAGE_ROOT, 'assets', 'voice-weiqu.mp3')] },
-}
-function soundSetFromUrl(url) {
-  try {
-    const q = String(url || '').split('?')[1] || ''
-    const m = /(?:^|&)set=([^&]+)/.exec(q)
-    return m ? decodeURIComponent(m[1]) : ''
-  } catch (err) { return '' }
 }
 const BALANCE_URL = 'https://api.deepseek.com/user/balance'
 const BALANCE_TTL_MS = 25000
@@ -766,44 +755,18 @@ const JSON_HEADERS = {
 
 // 浏览器端挂件代码已拆分为独立文件 whale-widget.js(与本文件同目录),
 // 不再内嵌模板字面量:可直接 node --check / IDE 高亮,改 widget 后硬刷新页面即生效(无需重启 DSH)。
-// 每次请求按 mtime 判断是否需要重读,避免常驻缓存导致改了不生效。
+// 读取实现见 whale-assets-routes.mjs（按 mtime 判断是否需要重读）。
 const WIDGET_FILE_CANDIDATES = [
   path.join(path.dirname(fileURLToPath(import.meta.url)), 'whale-widget.js'),
   path.join(PACKAGE_ROOT, 'whale-widget.js'),
   path.join(PACKAGE_ROOT, 'assets', 'whale-widget.js'),
 ]
-let widgetJsCache = null // { text, mtimeMs }
-function loadWidgetJs() {
-  for (const p of WIDGET_FILE_CANDIDATES) {
-    try {
-      const st = fs.statSync(p)
-      if (widgetJsCache && widgetJsCache.mtimeMs === st.mtimeMs) return widgetJsCache.text
-      const text = fs.readFileSync(p, 'utf8')
-      widgetJsCache = { text, mtimeMs: st.mtimeMs }
-      return text
-    } catch (err) {}
-  }
-  return widgetJsCache ? widgetJsCache.text : ''
-}
 // v881：桌面控制台页面（设计稿原样 + 预编译 Tailwind），由挂件内的 iframe 加载。
 const CONSOLE_FILE_CANDIDATES = [
   path.join(path.dirname(fileURLToPath(import.meta.url)), 'console.html'),
   path.join(PACKAGE_ROOT, 'console.html'),
   path.join(PACKAGE_ROOT, 'assets', 'console.html'),
 ]
-let consoleHtmlCache = null // { text, mtimeMs }
-function loadConsoleHtml() {
-  for (const p of CONSOLE_FILE_CANDIDATES) {
-    try {
-      const st = fs.statSync(p)
-      if (consoleHtmlCache && consoleHtmlCache.mtimeMs === st.mtimeMs) return consoleHtmlCache.text
-      const text = fs.readFileSync(p, 'utf8')
-      consoleHtmlCache = { text, mtimeMs: st.mtimeMs }
-      return text
-    } catch (err) {}
-  }
-  return consoleHtmlCache ? consoleHtmlCache.text : ''
-}
 
 // —— 桌面端（Electron）结构化注入行：**内联 script 行**，不是 script-src 行（issue #154）——
 // 桌面壳的 index.html 从安装包静态 dist 直出，`tapIndex`（函数变换）永远过不去；唯一通道是
@@ -1025,10 +988,8 @@ export default {
       })
       return ctx.webServer.register(wrapped)
     }
-    let imageBytes = null
     let balanceCache = null
     let balanceInFlight = null
-    let gifBytes = null
     // 每轮对话消耗统计：按 (session.id, turn) 分桶聚合，完成后写入 lastTurn。
     // 用 Map 分桶避免主会话与子代理（spawn/fork）并行时串账。
     let turnAggs = new Map() // sessionId -> { turn, cost, tokens, byModel, byModelTokens, lastTs }
@@ -1312,34 +1273,6 @@ export default {
     disposers.push(ctx.on('session/disposed', (session) => {
       if (session && session.id) turnAggs.delete(session.id)
     }))
-
-    function loadGif() {
-      if (gifBytes) return gifBytes
-      for (const p of RUA_GIF_CANDIDATES) {
-        try {
-          const bytes = fs.readFileSync(p)
-          if (bytes && bytes.length > 0) {
-            gifBytes = bytes
-            return bytes
-          }
-        } catch (err) {}
-      }
-      throw new Error('rua gif not found')
-    }
-
-    function loadImage() {
-      if (imageBytes) return imageBytes
-      for (const p of IMAGE_CANDIDATES) {
-        try {
-          const bytes = fs.readFileSync(p)
-          if (bytes && bytes.length > 0) {
-            imageBytes = bytes
-            return bytes
-          }
-        } catch (err) {}
-      }
-      throw new Error('whale image not found')
-    }
 
     function pickBalanceInfo(infos) {
       if (!Array.isArray(infos) || infos.length === 0) return null
@@ -3611,44 +3544,63 @@ export default {
       readAudioIndex, writeAudioIndex, audioFragmentPath, audioIdFromUrl,
       audioFragmentsPayload, audioGroupsPayload, audioPayload,
       loadAudioFragmentBytes, groupFragmentId, customFragExists,
+      pickAudioDir,
     } = roleAudioStore
+
+    const roleAudioRoutes = createWhaleRolesAudioRoutes({
+      JSON_HEADERS, readBody, readBodyMax,
+      roleDefaultId: ROLE_DEFAULT_ID, presetGroups: PRESET_GROUPS, presetFragments: PRESET_FRAGMENTS,
+      soundSets: SOUND_SETS, packageRoot: PACKAGE_ROOT,
+      pickRoleDir, readRolesIndex, writeRolesIndex, rolesPayload,
+      roleFileExt, roleFilePath, roleImagePath, roleIdFromUrl, roleIndexFind,
+      readAudioIndex, writeAudioIndex, audioFragmentPath, audioIdFromUrl,
+      audioFragmentsPayload, audioGroupsPayload, audioPayload,
+      loadAudioFragmentBytes, groupFragmentId, pickAudioDir, loadSound,
+      petAiFileCandidates: PET_AI_FILE_CANDIDATES,
+      surfcoreRequest, readSurfcoreHost, getCtx: () => ctx,
+    })
+    const {
+      rolesHandler, rolePinHandler, roleDeleteHandler, roleImageHandler,
+      audioHandler, audioFragmentHandler, pressSoundHandler, releaseSoundHandler,
+      voiceSoundHandler, ttsHandler, petAiHandler,
+    } = roleAudioRoutes
+
+    const assetsRoutes = createWhaleAssetsRoutes({
+      imageCandidates: IMAGE_CANDIDATES,
+      ruaGifCandidates: RUA_GIF_CANDIDATES,
+      exprDirCandidates: EXPR_DIR_CANDIDATES,
+      exprPackFile: EXPR_PACK_FILE,
+      exprPackIdRe: EXPR_PACK_ID_RE,
+      exprFileNameRe: EXPR_FILE_NAME_RE,
+      exprCuteMax: EXPR_CUTE_MAX,
+      exprCuteScanMax: EXPR_CUTE_SCAN_MAX,
+      exprPacksTtlMs: EXPR_PACKS_TTL_MS,
+      petVideoDir: PET_VIDEO_DIR,
+      bubbleImgDirCandidates: BUBBLE_IMG_DIR_CANDIDATES,
+      bubbleImgIndexName: BUBBLE_IMG_INDEX_NAME,
+      defaultBubbleImgs: DEFAULT_BUBBLE_IMGS,
+      bubbleImgFileCandidates,
+      widgetFileCandidates: WIDGET_FILE_CANDIDATES,
+      consoleFileCandidates: CONSOLE_FILE_CANDIDATES,
+      loadBubbleConfig, writeBubbleConfig, getBubbleConfigIgnored: () => bubbleConfigIgnored,
+      readBodyMax, JSON_HEADERS,
+    })
+    const {
+      imageHandler, ruaGifHandler, exprPacksHandler, exprImageHandler,
+      petVideoHandler, petAnimationsHandler, bubbleHandler, bubbleImgsHandler,
+      bubbleImgUploadHandler, bubbleImgHandler, widgetJsHandler, consoleHtmlHandler,
+    } = assetsRoutes
 
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/image.png',
-      handler: (req, res) => {
-        try {
-          const bytes = loadImage()
-          res.writeHead(200, {
-            'Content-Type': 'image/png',
-            'Cache-Control': 'no-store',
-            'Content-Length': String(bytes.length),
-          })
-          res.end(bytes)
-        } catch (err) {
-          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
-          res.end('whale image unavailable: ' + String((err && err.message) || err))
-        }
-      },
+      handler: imageHandler,
     }))
 
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/rua.gif',
-      handler: (req, res) => {
-        try {
-          const bytes = loadGif()
-          res.writeHead(200, {
-            'Content-Type': 'image/gif',
-            'Cache-Control': 'no-store',
-            'Content-Length': String(bytes.length),
-          })
-          res.end(bytes)
-        } catch (err) {
-          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
-          res.end('rua gif unavailable: ' + String((err && err.message) || err))
-        }
-      },
+      handler: ruaGifHandler,
     }))
 
     // ===== 平台用量同步（可选）：DeepSeek Platform 私有用量接口 =====
@@ -3797,208 +3749,84 @@ export default {
         return null
       }
     }
+    const accountingRoutes = createWhaleAccountingRoutes({
+      JSON_HEADERS, readBody, readBodyMax,
+      fetchPlatformUsage,
+      getPlatformUsageSource: () => platformUsageSource,
+      getPlatformUsageCode: () => platformUsageCode,
+      setPlatformToken: async (token) => {
+        await ctx.credentials.set('DEEPSEEK_USER_TOKEN', token)
+        platformUsageCache = null
+        platformUsageAt = 0
+      },
+      getBalance,
+      setBalanceLast: (v) => { balanceLast = v },
+      BUILD_VERSION, BUILD_CHANNEL, VERSION_LABEL,
+      getLastTurn: () => lastTurn,
+      getLastTurnSeq: () => lastTurnSeq,
+      getLastStep: () => lastStep,
+      getWaitState: () => waitState,
+      getAboutPayload: () => aboutPayload,
+      usageRecordsPayload,
+      API_BUILTIN_ID, canAdjustBuiltinBalance, apiModelById,
+      todayKey, readUsageLedger, writeUsageLedger, reconcileBalance,
+      accountingDays, balanceSummary,
+      resetBalanceCache: () => { balanceCache = null },
+      httpsGetJson, npmCliVersion,
+    })
+    const {
+      platformUsageHandler, platformTokenHandler, balanceHandler,
+      lastTurnHandler, lastStepHandler, waitHandler, aboutHandler,
+      updateCheckHandler, usageRecordsHandler, balanceAdjustmentsHandler,
+    } = accountingRoutes
+
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/platform-usage.json',
-      handler: async (req, res) => {
-        try {
-          const refresh = new URL(req.url || '/', 'http://localhost').searchParams.get('refresh') === '1'
-          const data = await fetchPlatformUsage(refresh)
-          res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify(data ? Object.assign({ ok: true, source: platformUsageSource }, data) : { ok: false, code: platformUsageCode || 'NO_TOKEN' }))
-        } catch (err) {
-          res.writeHead(500, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, code: 'ERROR' }))
-        }
-      },
+      handler: platformUsageHandler,
     }))
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/platform-token.json',
-      handler: async (req, res) => {
-        try {
-          if (req.method === 'PUT' || req.method === 'POST') {
-            const raw = await readBody(req)
-            let body = null
-            try { body = JSON.parse(raw || '{}') } catch (err) { body = null }
-            const token = String((body && body.token) || '').trim()
-            if (!token) {
-              res.writeHead(400, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: false, code: 'EMPTY' }))
-              return
-            }
-            await ctx.credentials.set('DEEPSEEK_USER_TOKEN', token)
-            platformUsageCache = null
-            platformUsageAt = 0
-            const data = await fetchPlatformUsage(true)
-            res.writeHead(200, JSON_HEADERS)
-            res.end(JSON.stringify(data ? Object.assign({ ok: true, source: platformUsageSource }, data) : { ok: false, code: platformUsageCode || 'AUTH_FAILED' }))
-            return
-          }
-          res.writeHead(405, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, code: 'METHOD' }))
-        } catch (err) {
-          // v882：读体超限（BODY_TOO_LARGE）带 status=413 —— 照抄它，别一律报 500
-          res.writeHead(Number(err && err.status) || 500, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, code: 'ERROR', error: String((err && err.message) || err).slice(0, 160) }))
-        }
-      },
+      handler: platformTokenHandler,
     }))
 
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/balance.json',
-      handler: async (req, res) => {
-        // v882（审查发现）：这里原来没有 `t0`，而下面两处 `Date.now() - t0` 都写在 try/catch 里
-        //   ⇒ ReferenceError 被静默吞掉，`balanceLast` **永远是 null**，「关于/自检」面板的
-        //   「余额取数」一行因此永远显示"本次会话尚未取过"。t0 必须在取数前就位。
-        const t0 = Date.now()
-        // 后台刷新平台用量（不阻塞本次响应；有缓存时响应里直接用缓存值）
-        try { fetchPlatformUsage(false).catch(function () {}) } catch (err) {}
-        try {
-          const refresh = new URL(req.url || '/', 'http://localhost').searchParams.get('refresh') === '1'
-          const payload = await getBalance(refresh)
-          // v793：给「关于/自检」面板留一条最近的取数结果（只记状态与耗时，不记任何凭据）
-          try {
-            balanceLast = {
-              at: Date.now(),
-              ms: Date.now() - t0,
-              ok: !!payload.ok,
-              code: String(payload.code || ''),
-              error: payload.ok ? '' : String(payload.error || '').slice(0, 160),
-              hasBalance: payload.totalBalance !== null && payload.totalBalance !== undefined,
-              currency: String(payload.currency || ''),
-            }
-          } catch (err) {}
-          res.writeHead(200, JSON_HEADERS)
-          // v794：成功失败都带上版本 ⇒ 客户端不必依赖"余额成功"才拿到版号
-          res.end(JSON.stringify(Object.assign({}, payload, { version: BUILD_VERSION, versionLabel: VERSION_LABEL })))
-        } catch (err) {
-          try {
-            balanceLast = { at: Date.now(), ms: Date.now() - t0, ok: false, code: 'THROW', error: String((err && err.message) || err).slice(0, 160), hasBalance: false, currency: '' }
-          } catch (e2) {}
-          res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, code: 'ERROR', error: String((err && err.message) || err).slice(0, 200), version: BUILD_VERSION, versionLabel: VERSION_LABEL }))
-        }
-      },
+      handler: balanceHandler,
     }))
 
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/last-turn.json',
-      handler: (req, res) => {
-        // 返回最近一轮已完成的对话消耗；seq 递增供前端判断「新的一轮」
-        // unpriced/unpricedTokens：本轮有第三方模型没配单价（金额不可算），前端显示 token 而不是钱
-        const payload = lastTurn
-          ? { ok: true, seq: lastTurnSeq, turn: lastTurn.turn, amount: lastTurn.amount, tokens: lastTurn.tokens, ts: lastTurn.ts, unpriced: lastTurn.unpriced === true, unpricedTokens: lastTurn.unpricedTokens || 0 }
-          : { ok: true, seq: 0, turn: null, amount: null, tokens: null, ts: null }
-        res.writeHead(200, JSON_HEADERS)
-        res.end(JSON.stringify(payload))
-      },
+      handler: lastTurnHandler,
     }))
 
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/last-step.json',
-      handler: (req, res) => {
-        // 逐步骤金额（每次模型调用完成就 +1）：前端在峰谷徽标上方滚动显示「-x.xx」
-        const payload = lastStep
-          ? { ok: true, seq: lastStep.seq, amount: lastStep.amount, tokens: lastStep.tokens, model: lastStep.model, ts: lastStep.ts }
-          : { ok: true, seq: 0, amount: null, tokens: null, model: '', ts: null }
-        res.writeHead(200, JSON_HEADERS)
-        res.end(JSON.stringify(payload))
-      },
+      handler: lastStepHandler,
     }))
+
+    const miscRoutes = createWhaleMiscRoutes({
+      JSON_HEADERS, readBody, readBodyMax, surfcoreRequest,
+      readSizeConfig, writeSizeConfig, normalizeUsageMode, exprPackId, exprDefaults,
+      resetBalanceCache: () => { balanceCache = null },
+      codexInvalidate, BUILD_VERSION, VERSION_LABEL,
+    })
+    const { qqSyncHandler, sizeHandler } = miscRoutes
 
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/size.json',
-      handler: async (req, res) => {
-        if (req.method === 'PUT' || req.method === 'POST') {
-          try {
-            const body = await readBody(req)
-            const parsed = JSON.parse(body)
-            const scale = typeof parsed.scale === 'number' ? parsed.scale : null
-            if (scale === null) {
-              res.writeHead(400, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: false, error: 'missing scale' }))
-              return
-            }
-            // issue #97：缺字段一律「沿用现有值」，绝不落默认 —— 否则任何不全的 PUT
-            // （旧客户端 / 手写 curl / 加载竞态）都会把用户的设置洗成默认值。
-            // 特别注意 scrollGapPx：读取默认是 17，而写入缺省曾是 0，会静默把避让宽度改掉。
-            const old = readSizeConfig() || {}
-            const pickB = (v, cur, dflt) => (typeof v === 'boolean' ? v : (typeof cur === 'boolean' ? cur : dflt))
-            const pickN = (v, cur, dflt) => (typeof v === 'number' ? v : (typeof cur === 'number' ? cur : dflt))
-            const pickS = (v, cur, dflt) => (typeof v === 'string' && v ? v : (typeof cur === 'string' && cur ? cur : dflt))
-            // 用量模式变化时让余额缓存失效，下次请求立即按新模式计算
-            if (typeof parsed.usageMode === 'string') {
-              if (normalizeUsageMode(old.usageMode) !== normalizeUsageMode(parsed.usageMode)) {
-                balanceCache = null
-              }
-            }
-            const result = writeSizeConfig(
-              scale,
-              pickB(parsed.sound, old.sound, true),
-              pickN(parsed.vol, old.vol, 0.9),
-              pickS(parsed.soundSet, old.soundSet, 'duck'),
-              typeof parsed.usageMode === 'string' ? parsed.usageMode : old.usageMode,
-              typeof parsed.peakMode === 'string' ? parsed.peakMode : old.peakMode,
-              pickB(parsed.bubbleOn, old.bubbleOn, true),
-              pickB(parsed.pressOn, old.pressOn, true),
-              pickB(parsed.turnCostOn, old.turnCostOn, true),
-              pickN(parsed.turnCostCloseMs, old.turnCostCloseMs, 5000),
-              pickB(parsed.scrollGapOn, old.scrollGapOn, false),
-              pickN(parsed.scrollGapPx, old.scrollGapPx, 17),
-              pickB(parsed.menuBtnHide, old.menuBtnHide, false),
-              pickB(parsed.codexStatsOn, old.codexStatsOn, true),
-              // 表情配置：exprPack 允许显式传空串来「清除选择」（不同于 pickS —— 它会把空串当成
-              // "本次没给"而沿用旧值，导致选不回自动）；缺字段时仍沿用旧值，防洗成默认。
-              // 值的合法性判定与另外两处共用 exprPackId（非法 id 一律归一成 '' = 自动）。
-              typeof parsed.exprPack === 'string' ? exprPackId(parsed.exprPack) : (typeof old.exprPack === 'string' ? old.exprPack : ''),
-              pickB(parsed.exprOn, old.exprOn, true),
-              pickB(parsed.blinkOn, old.blinkOn, true),
-              // 厂商额度（选装）：默认关；vendorQuotaModel 允许显式传空串来清除选择（同 exprPack 的处理）
-              pickB(parsed.vendorQuotaOn, old.vendorQuotaOn, false),
-              typeof parsed.vendorQuotaModel === 'string' ? parsed.vendorQuotaModel : (typeof old.vendorQuotaModel === 'string' ? old.vendorQuotaModel : ''),
-              pickB(parsed.volcQuotaOn, old.volcQuotaOn, false)
-            )
-            res.writeHead(result.ok ? 200 : 500, JSON_HEADERS)
-            // 配置刚变（可能刚关掉/打开 Codex 统计）→ 丢掉旧快照，让下一次请求立刻反映新设置
-            if (result.ok) { try { codexInvalidate() } catch (err) {} }
-            res.end(JSON.stringify(result))
-          } catch (err) {
-            res.writeHead(400, JSON_HEADERS)
-            res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err) }))
-          }
-          return
-        }
-        res.writeHead(200, JSON_HEADERS)
-        // v794：GET 也带上版本（客户端启动就会读这份配置 ⇒ 菜单底部那行版本小字**不必等余额请求**，
-        //   余额首次请求失败时也不会一直空着 —— 这是用户报的"刚启动时版号消失"）
-        // 注：配置文件还不存在时 readSizeConfig() 返回 null，此时必须补上表情层三键的默认值 ——
-        //   因为这三键的语义是**宿主默认开**，而前端只有读到 boolean 才会赋值（读不到就保持初始的"关"），
-        //   不补的话全新安装下表情层会静默不生效。
-        res.end(JSON.stringify(Object.assign({}, readSizeConfig() || exprDefaults(), {
-          version: BUILD_VERSION,
-          versionLabel: VERSION_LABEL,
-        })))
-      },
+      handler: sizeHandler,
     }))
 
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/wait.json',
-      handler: (req, res) => {
-        // v761（issue #161）：等待用户交互的挂起状态（提问 / 授权）。
-        // 沿用"宿主出状态 + 前端每秒轮询"的既有模式，不引入新通道。
-        res.writeHead(200, JSON_HEADERS)
-        res.end(JSON.stringify({
-          ok: true,
-          pending: waitState.pending,
-          sessionName: waitState.sessionName || '',
-        }))
-      },
+      handler: waitHandler,
     }))
     // ===== v793（用户要求）：点版号 → 「关于 / 自检」面板 =====
     // 数据来源全部是宿主已有状态；路径一律脱敏；**点开才请求，不轮询**。
@@ -4018,15 +3846,7 @@ export default {
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/about.json',
-      handler: (req, res) => {
-        try {
-          res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify(aboutPayload(req)))
-        } catch (err) {
-          res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err).slice(0, 160) }))
-        }
-      },
+      handler: aboutHandler,
     }))
     // 检查更新：**点了才联网**。⚠️ 实测教训（用户报的 "The operation was aborted due to timeout" 就是它）：
     //   ① 本机 Node 的 `fetch`(undici) 打 registry 会超时（npmmirror 6015ms / npmjs 6013ms 全挂），
@@ -4078,170 +3898,25 @@ export default {
         } catch (err) { reject(err) }
       })
     }
-    const UPDATE_SOURCES = [
-      { name: 'npmmirror', url: 'https://registry.npmmirror.com/dsh-whale-widget/latest' },
-      { name: 'jsdelivr', url: 'https://cdn.jsdelivr.net/npm/dsh-whale-widget@latest/package.json' },
-      { name: 'unpkg', url: 'https://unpkg.com/dsh-whale-widget@latest/package.json' },
-      { name: 'npmjs', url: 'https://registry.npmjs.org/dsh-whale-widget/latest' },
-      { name: 'npm-cli', cli: true },
-    ]
-    let updateCheckCache = null
+    // 检查更新的源列表与并行降级逻辑已搬到 whale-accounting-routes.mjs。
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/update-check.json',
-      handler: async (req, res) => {
-        // v882（审查发现）：这是一个"点一下才联网"的 GET 接口，内部会并行打 5 个外部源
-        //   （含 `npm view` 子进程）。原来**任何方法**都会触发一次完整外呼 ⇒ 补方法与缓存前置校验。
-        if (req.method !== 'GET' && req.method !== undefined) {
-          res.writeHead(405, { ...JSON_HEADERS, Allow: 'GET' })
-          res.end(JSON.stringify({ ok: false, error: '不支持的请求方法' }))
-          return
-        }
-        const now = Date.now()
-        try {
-          if (updateCheckCache && now - updateCheckCache.at < 10 * 60 * 1000) {
-            res.writeHead(200, JSON_HEADERS)
-            res.end(JSON.stringify(updateCheckCache.payload))
-            return
-          }
-        } catch (err) {}
-        let payload = null
-        // v802：四个源**并行**试（单个源实测很不稳：npmmirror/jsdelivr 会超时、unpkg 会 302），
-        //   并行后最坏也就 5 秒（串行会是 20 秒），谁先成功用谁，全失败就把每个源的原因都列出来。
-        const results = await Promise.all(UPDATE_SOURCES.map(async (src) => {
-          // v803：失败得**很快**（<1.5s，多为 DNS/连接抖动）就再试一次；超时那种就不重试了（不然最坏翻倍）
-          const attempt = async () => {
-            const t0 = Date.now()
-            if (src.cli) return { v: await npmCliVersion(8000), ms: Date.now() - t0 }
-            const j = await httpsGetJson(src.url, 5000, 0)
-            const latest = String((j && j.version) || '')
-            if (!latest) throw new Error('返回里没有 version')
-            return { v: latest, ms: Date.now() - t0 }
-          }
-          try {
-            const a = await attempt()
-            return { ok: true, name: src.name, latest: a.v }
-          } catch (err1) {
-            // 只在"失败得很快"（<1.5s，多为连接抖动）时重试一次；超时那种不重试，避免最坏耗时翻倍
-            const fast = !(err1 && /超时/.test(String(err1.message || '')))
-            if (!fast) return { ok: false, name: src.name, why: String((err1 && err1.message) || err1).slice(0, 40) }
-            try {
-              const a2 = await attempt()
-              return { ok: true, name: src.name, latest: a2.v }
-            } catch (err2) {
-              return { ok: false, name: src.name, why: String((err2 && err2.message) || err2).slice(0, 40) }
-            }
-          }
-        }))
-        const hit = results.filter((r) => r.ok)[0]
-        if (hit) {
-          payload = {
-            ok: true,
-            current: BUILD_VERSION,
-            channel: BUILD_CHANNEL,
-            latest: hit.latest,
-            hasUpdate: hit.latest !== BUILD_VERSION,
-            source: hit.name,
-          }
-        } else {
-          // 全失败 ⇒ 把**每一个源**的原因都列出来（只报最后一个会让人以为只有 npmjs 挂了）
-          payload = {
-            ok: false,
-            current: BUILD_VERSION,
-            error: results.map((r) => r.name + '：' + r.why).join('；'),
-            tried: UPDATE_SOURCES.map((s) => s.name),
-          }
-        }
-        try { updateCheckCache = { at: now, payload: payload } } catch (err) {}
-        res.writeHead(200, JSON_HEADERS)
-        res.end(JSON.stringify(payload))
-      },
+      handler: updateCheckHandler,
     }))
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/usage-records.json',
-      handler: async (req, res) => {
-        try {
-          // Reports read the committed ledger. Replaying cached balance samples
-          // here could roll back a correction or create a false midnight baseline.
-          res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify(usageRecordsPayload()))
-        } catch (err) {
-          res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err) }))
-        }
-      },
+      handler: usageRecordsHandler,
     }))
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/balance-adjustments.json',
-      handler: async (req, res) => {
-        try {
-          // 先核对身份再碰余额或账本：必须是唯一且明确的 DeepSeek（内置）。
-          // 新增厂商模板不会自动继承这个能力，也拒绝其它模型读写校正。
-          const targetIds = new URL(req.url || '/', 'http://localhost').searchParams.getAll('modelId')
-          const targetModelId = targetIds.length === 1 ? targetIds[0] : null
-          if (targetModelId !== API_BUILTIN_ID || !canAdjustBuiltinBalance(apiModelById(targetModelId))) {
-            const error = new Error('余额校正仅支持 DeepSeek（内置），请从该模型的设置菜单进入')
-            error.status = 403
-            throw error
-          }
-          if (req.method === 'PUT') {
-            const input = JSON.parse(await readBodyMax(req, 8192))
-            if (!input || typeof input !== 'object') throw new Error('校正内容无效')
-            if (input.modelId !== targetModelId) {
-              const error = new Error('校正请求的模型不匹配，仅支持 DeepSeek（内置）')
-              error.status = 403
-              throw error
-            }
-            if (input.day === todayKey()) {
-              const fresh = await getBalance(true)
-              if (!fresh.ok || fresh.stale) {
-                res.writeHead(503, JSON_HEADERS)
-                res.end(JSON.stringify({ ok: false, error: '暂时无法刷新余额，请稍后再保存校正' }))
-                return
-              }
-            }
-            const led = readUsageLedger()
-            const summary = reconcileBalance(led, input)
-            if (!writeUsageLedger(led)) throw new Error('校正保存失败，请检查 DSH 数据目录写入权限')
-            balanceCache = null
-            res.writeHead(200, JSON_HEADERS)
-            res.end(JSON.stringify({ ok: true, summary }))
-            return
-          }
-          if (req.method !== 'GET' && req.method !== undefined) {
-            res.writeHead(405, { ...JSON_HEADERS, Allow: 'GET, PUT' })
-            res.end(JSON.stringify({ ok: false, error: '不支持的请求方法' }))
-            return
-          }
-          const fresh = await getBalance(true)
-          const led = readUsageLedger()
-          // v882（审查发现）：accountingDays() 是**所有记账本的日期并集**（换过 API key 时旧本的日期也在里面），
-          //   而 balanceSummary() 只认当前本 ⇒ 旧本独有的日期会算成 null 一起下发，前端 `rows.forEach(row => row.day)`
-          //   直接 TypeError，整个「余额校正」弹窗打不开。这里只下发**当前本真有观测行**的日子
-          //   （校正本来就只能针对当前本的行：reconcileBalance 对缺失行会报「这一天没有余额观测记录」）。
-          const days = accountingDays(led).sort().reverse()
-            .map(day => balanceSummary(led, day))
-            .filter(Boolean)
-          res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify({
-            ok: true, days, today: todayKey(), fresh: !!fresh.ok && !fresh.stale,
-            error: !fresh.ok || fresh.stale ? (fresh.error || '余额暂未刷新') : null,
-          }))
-        } catch (err) {
-          res.writeHead(err.status || 400, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err).slice(0, 240) }))
-        }
-      },
+      handler: balanceAdjustmentsHandler,
     }))
 
     // 用量设置(任务结束音/余额预警/今日预算)
-    // —— 桌宠碎碎念 / 对话：用 DSH 的 LLM 统一抽象层（模型跟随当前对话，不自己拼厂商端点）——
-    const PET_AI_DEFAULT_PERSONA = '你是一只住在电脑桌面上的小鲸鱼桌宠，性格活泼可爱、好奇心强，说话口语化、简短自然。'
-    const PET_AI_CALL_IDENTITY = 'dsh-whale-widget'
-    const PET_AI_WHISPER_TEXT = '随便说一句日常碎碎念，一句就好，20 字以内。'
-    const PET_AI_MAX_HISTORY = 40 // 磁盘上最多保留 40 条（≈20 轮）
+    // —— 桌宠碎碎念 / 对话的实现已搬到 whale-roles-audio-routes.mjs（模型跟随当前对话）——
     // —— 与 SurfCore（QQ ↔ DSH 桥接）联动 ——
     // 对话直接走 SurfCore 的本地 pet-api，共用同一份人格卡/记忆卡；挂件自己只管
     // 气泡、表情、动画。host.json 由 surfcore 插件定期重写（DSH 端口漂移时会变），
@@ -4267,32 +3942,6 @@ export default {
         } catch (err) {}
       }
       return null
-    }
-    async function surfcoreChat(text) {
-      const host = readSurfcoreHost()
-      if (!host) return null
-      const url = String(host.baseUrl).replace(/\/+$/, '') + String(host.api) + '/chat'
-      try {
-        const r = await fetch(url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-pet-token': String(host.token) },
-          body: JSON.stringify({ text, modality: 'text' }),
-          // 服务端桌宠对话的超时是 90s（pet-chat CHAT_LLM_TIMEOUT_MS）：
-          // 这里必须比它长，否则「正常但稍慢」的回复会被前端提前放弃，
-          // 静默降级成挂件自带模型 —— 用户会以为她失忆/换了个人。
-          signal: AbortSignal.timeout(150000),
-        })
-        const body = await r.json().catch(() => null)
-        if (!r.ok || !body || !body.ok || !body.reply || typeof body.reply.text !== 'string') {
-          // 保留失败原因，便于诊断为什么降级（原来直接 return null，现场无迹可查）。
-          console.warn('[pet-ai] SurfCore 对话失败，回退挂件模型:', (body && (body.error || body.message)) || `HTTP ${r.status}`)
-          return null
-        }
-        return { text: body.reply.text, audioKey: (body.reply.audio && body.reply.audio.key) || '' }
-      } catch (err) {
-        console.warn('[pet-ai] SurfCore 对话异常，回退挂件模型:', (err && err.message) || err)
-        return null
-      }
     }
     /**
      * 通用 SurfCore pet-api 请求：读 host.json 拿 baseUrl + token。
@@ -4324,352 +3973,20 @@ export default {
         return r.ok ? data : { ok: false, error: (data && data.error) || `HTTP ${r.status}` }
       } catch (err) { return null }
     }
-    function normalizePetAi(raw) {
-      const r = raw && typeof raw === 'object' ? raw : {}
-      const every = Number(r.whisperEveryMin)
-      const hist = Array.isArray(r.history) ? r.history : []
-      return {
-        persona: typeof r.persona === 'string' ? r.persona.slice(0, 2000) : '',
-        whisperOn: r.whisperOn !== false,
-        whisperEveryMin: (isFinite(every) && every >= 1) ? Math.min(240, Math.round(every)) : 30,
-        // 默认接 SurfCore；没有 host.json 时 surfcoreChat() 返回 null，自动回退到挂件自己的模型。
-        linkSurfcore: r.linkSurfcore !== false,
-        history: hist
-          .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
-          .map((m) => ({ role: m.role, content: String(m.content).slice(0, 2000), ts: Number(m.ts) || 0 }))
-          .slice(-PET_AI_MAX_HISTORY),
-      }
-    }
-    function readPetAi() {
-      for (const p of PET_AI_FILE_CANDIDATES) {
-        try {
-          const parsed = JSON.parse(fs.readFileSync(p, 'utf8'))
-          if (parsed && typeof parsed === 'object') return normalizePetAi(parsed)
-        } catch (err) {}
-      }
-      return normalizePetAi(null)
-    }
-    function writePetAi(cfg) {
-      const body = JSON.stringify(cfg, null, 2)
-      for (const p of PET_AI_FILE_CANDIDATES) {
-        try { fs.writeFileSync(p, body, 'utf8'); return true } catch (err) {}
-      }
-      return false
-    }
-    function petAiSettings(cfg) {
-      return { persona: cfg.persona || PET_AI_DEFAULT_PERSONA, whisperOn: !!cfg.whisperOn, whisperEveryMin: cfg.whisperEveryMin, linkSurfcore: cfg.linkSurfcore !== false }
-    }
-    // 时间背景：每次生成现算（人设 + 名字 + 此刻时间，与 dsh-pet 的 composeSystemPrompt 同构）
-    function petAiTimeContext(now) {
-      try {
-        const d = now instanceof Date ? now : new Date()
-        if (!isFinite(d.getTime())) return ''
-        const week = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][d.getDay()]
-        const hh = d.getHours()
-        let slot = '深夜'
-        if (hh >= 5 && hh < 9) slot = '清晨'
-        else if (hh >= 9 && hh < 12) slot = '上午'
-        else if (hh >= 12 && hh < 14) slot = '中午'
-        else if (hh >= 14 && hh < 18) slot = '下午'
-        else if (hh >= 18 && hh < 23) slot = '晚上'
-        const pad = (n) => String(n).padStart(2, '0')
-        return '现在是 ' + (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + week + ' ' + slot +
-          '（' + pad(hh) + ':' + pad(d.getMinutes()) + '）。'
-      } catch (err) { return '' }
-    }
-    function petAiSystem(cfg) {
-      const lines = [cfg.persona && cfg.persona.trim() ? cfg.persona.trim() : PET_AI_DEFAULT_PERSONA, '你的名字是“小鲸鱼”。']
-      const t = petAiTimeContext(new Date())
-      if (t) lines.push(t)
-      return lines.join('\n')
-    }
-    // 当前对话的模型（agentDefaultModel 是宿主服务；用 ctx.get 可选读取，拿不到就报“未配置模型”）
-    function petAiModelRef() {
-      try {
-        const adm = ctx.get('agentDefaultModel', false)
-        const sel = adm && typeof adm.currentSelection === 'function' ? adm.currentSelection() : null
-        if (sel && sel.provider && sel.model) return { provider: String(sel.provider), model: String(sel.model) }
-      } catch (err) {}
-      return null
-    }
-    function petAiMessages(history, userText, sel) {
-      const out = []
-      const mkId = () => 'pet-ai-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
-      for (const m of history || []) {
-        out.push({
-          id: mkId(),
-          role: m.role === 'assistant' ? 'assistant' : 'user',
-          content: [{ type: 'text', text: String(m.content || '') }],
-          source: m.role === 'assistant'
-            ? { kind: 'model', provider: sel.provider, model: sel.model }
-            : { kind: 'user' },
-        })
-      }
-      out.push({ id: mkId(), role: 'user', content: [{ type: 'text', text: String(userText || '') }], source: { kind: 'user' } })
-      return out
-    }
-    function petAiNoTextReason(finish) {
-      const kind = finish && finish.kind
-      const failure = finish && finish.failure
-      if (kind === 'aborted') return '生成已取消'
-      if (kind === 'max-tokens') return '输出达到上限，未产出正文'
-      if (kind !== 'error') return '模型未返回文本'
-      if (failure && typeof failure.message === 'string' && failure.message.trim()) return failure.message
-      if (failure && typeof failure.code === 'string' && failure.code.trim()) return failure.code
-      return '未提供失败原因'
-    }
-    /**
-     * 跑一次生成：kind = 'whisper' | 'chat'。
-     * 用 ctx.llm.stream（适配器路由/模型解析/凭据都由宿主接管），流式收集 text 块；
-     * 不显式传 reasoningEffort（无 reasoning 元数据的模型传 off 会被折成空流）。
-     */
-    async function petAiGenerate(kind, cfg, history, userText) {
-      const sel = petAiModelRef()
-      if (!sel) return { ok: false, reason: 'provider-missing', message: '当前对话未配置模型' }
-      let llm = null
-      try { llm = ctx.get('llm', false) } catch (err) { llm = null }
-      if (!llm || typeof llm.stream !== 'function') return { ok: false, reason: 'generate-error', message: 'LLM 服务不可用' }
-      const timeoutMs = kind === 'chat' ? 60000 : 30000
-      const ac = new AbortController()
-      let timedOut = false
-      const timer = setTimeout(() => { timedOut = true; try { ac.abort() } catch (err) {} }, timeoutMs)
-      let finish = null
-      let text = ''
-      try {
-        const stream = llm.stream({
-          provider: sel.provider,
-          model: sel.model,
-          sessionId: PET_AI_CALL_IDENTITY,
-          messages: petAiMessages(history, userText, sel),
-          system: petAiSystem(cfg),
-          temperature: 1,
-          signal: ac.signal,
-        })
-        // 迷你 BlockAssembler：按 index 归并 delta / block-end，只取 text 块
-        const partials = new Map()
-        const order = []
-        const ensure = (index, blockType) => {
-          let p = partials.get(index)
-          if (!p) {
-            p = { blockType: blockType || 'text', text: '', block: null }
-            partials.set(index, p)
-            order.push(index)
-          }
-          return p
-        }
-        for await (const chunk of stream) {
-          if (!chunk || typeof chunk !== 'object') continue
-          if (chunk.type === 'block-start') ensure(chunk.index, chunk.blockType)
-          else if (chunk.type === 'text-delta') {
-            const p = ensure(chunk.index, 'text')
-            if (!p.block) p.text += String(chunk.text || '')
-          } else if (chunk.type === 'reasoning-delta') ensure(chunk.index, 'reasoning')
-          else if (chunk.type === 'block-end') {
-            const p = ensure(chunk.index, (chunk.block && chunk.block.type) || 'text')
-            if (!p.block) p.block = chunk.block || null
-          } else if (chunk.type === 'finish') finish = chunk.reason
-        }
-        text = order
-          .map((i) => {
-            const p = partials.get(i)
-            return p.block ? p.block : { type: p.blockType, text: p.text }
-          })
-          .filter((b) => b && b.type === 'text')
-          .map((b) => String(b.text || ''))
-          .join('')
-          .trim()
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        if (timedOut || (msg && msg.indexOf('abort') >= 0)) return { ok: false, reason: 'generate-error', message: '生成超时（' + Math.round(timeoutMs / 1000) + 's）' }
-        return { ok: false, reason: 'generate-error', message: msg }
-      } finally {
-        clearTimeout(timer)
-      }
-      if (!text) return { ok: false, reason: 'generate-error', message: petAiNoTextReason(finish) }
-      return { ok: true, text }
-    }
+    // 桌宠对话与 SurfCore 桥接实现已搬到 whale-roles-audio-routes.mjs。
 
     // 桌宠碎碎念 / 对话：GET 读配置 + 历史；POST {action: settings|whisper|chat|clear}
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/pet-ai.json',
-      handler: async (req, res) => {
-        try {
-          if (req.method === 'PUT' || req.method === 'POST') {
-            const body = await readBody(req)
-            const parsed = JSON.parse(body || '{}')
-            const action = String((parsed && parsed.action) || '')
-            const cfg = readPetAi()
-            if (action === 'settings') {
-              if (typeof parsed.persona === 'string') cfg.persona = parsed.persona.slice(0, 2000)
-              if (typeof parsed.whisperOn === 'boolean') cfg.whisperOn = parsed.whisperOn
-              const n = Number(parsed.whisperEveryMin)
-              if (isFinite(n) && n >= 1) cfg.whisperEveryMin = Math.min(240, Math.round(n))
-              if (typeof parsed.linkSurfcore === 'boolean') cfg.linkSurfcore = parsed.linkSurfcore
-              const ok = writePetAi(cfg)
-              res.writeHead(ok ? 200 : 500, JSON_HEADERS)
-              res.end(JSON.stringify(ok ? { ok: true, settings: petAiSettings(cfg) } : { ok: false, error: 'write failed' }))
-              return
-            }
-            if (action === 'clear') {
-              cfg.history = []
-              const ok = writePetAi(cfg)
-              res.writeHead(ok ? 200 : 500, JSON_HEADERS)
-              res.end(JSON.stringify(ok ? { ok: true, settings: petAiSettings(cfg), history: [] } : { ok: false, error: 'write failed' }))
-              return
-            }
-            if (action === 'whisper') {
-              const r = await petAiGenerate('whisper', cfg, [], PET_AI_WHISPER_TEXT)
-              res.writeHead(200, JSON_HEADERS)
-              res.end(JSON.stringify(r.ok ? { ok: true, text: r.text } : { ok: false, reason: r.reason, message: r.message }))
-              return
-            }
-            if (action === 'chat') {
-              const text = String(parsed.text || '').trim().slice(0, 500)
-              if (!text) {
-                res.writeHead(400, JSON_HEADERS)
-                res.end(JSON.stringify({ ok: false, message: '说点什么吧' }))
-                return
-              }
-              // 优先交给 SurfCore：同一个人格卡/记忆卡，桌面和 QQ 里是同一只小鲸鱼。
-              // 桥接没起、令牌过期或超时时回退到挂件自己的模型，不影响使用。
-              const linked = cfg.linkSurfcore !== false ? await surfcoreChat(text) : null
-              if (linked) {
-                const linkedAt = Date.now()
-                cfg.history.push({ role: 'user', content: text, ts: linkedAt })
-                cfg.history.push({ role: 'assistant', content: linked.text, ts: linkedAt })
-                cfg.history = cfg.history.slice(-PET_AI_MAX_HISTORY)
-                writePetAi(cfg)
-                res.writeHead(200, JSON_HEADERS)
-                res.end(JSON.stringify({ ok: true, text: linked.text, audioKey: linked.audioKey, source: 'surfcore', settings: petAiSettings(cfg), history: cfg.history }))
-                return
-              }
-              const r = await petAiGenerate('chat', cfg, cfg.history.slice(-12), text)
-              if (!r.ok) {
-                res.writeHead(200, JSON_HEADERS)
-                res.end(JSON.stringify({ ok: false, reason: r.reason, message: r.message }))
-                return
-              }
-              const now = Date.now()
-              cfg.history.push({ role: 'user', content: text, ts: now })
-              cfg.history.push({ role: 'assistant', content: r.text, ts: now })
-              cfg.history = cfg.history.slice(-PET_AI_MAX_HISTORY)
-              writePetAi(cfg)
-              res.writeHead(200, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: true, text: r.text, settings: petAiSettings(cfg), history: cfg.history }))
-              return
-            }
-            res.writeHead(400, JSON_HEADERS)
-            res.end(JSON.stringify({ ok: false, error: 'unknown action' }))
-            return
-          }
-          const cfg = readPetAi()
-          res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: true, settings: petAiSettings(cfg), history: cfg.history }))
-        } catch (err) {
-          res.writeHead(400, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err).slice(0, 200) }))
-        }
-      },
+      handler: petAiHandler,
     }))
 
-    // QQ 对话同步：长轮询 SurfCore 的 QQ 消息事件 + 读取历史 + 代主人回复。
-    // 浏览器端只碰这个同源路由，令牌/baseUrl 都留在宿主侧。
+    // QQ 对话同步实现已搬到 whale-misc-routes.mjs。
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/qq-sync.json',
-      handler: async (req, res) => {
-        try {
-          const url = new URL(req.url || '/', 'http://127.0.0.1')
-          if (req.method === 'POST') {
-            // v882（审查发现）：这里原来用 readBody（8KB 上限）却按 64KB 做前置检查 ——
-            //   8~64KB 的请求体会先通过检查、再被 readBody 直接 destroy 连接，客户端看到的是 ECONNRESET
-            //   而不是下面这条 413。改成同一个上限，两处保持一致。
-            const declared = Number(req.headers['content-length'] || 0)
-            if (declared > 64 * 1024) {
-              res.writeHead(413, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: false, error: '请求体过大（上限 64KB）' }))
-              return
-            }
-            const body = JSON.parse((await readBodyMax(req, 64 * 1024)) || '{}')
-            // 严格校验：只接受字符串，且最多 150 字（和卡片输入框上限一致），不再静默截断/强转
-            if (typeof body.text !== 'string') {
-              res.writeHead(400, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: false, error: '消息格式不正确' }))
-              return
-            }
-            const text = body.text.trim()
-            if (!text) {
-              res.writeHead(400, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: false, error: '消息不能为空' }))
-              return
-            }
-            if (text.length > 150) {
-              res.writeHead(400, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: false, error: `消息太长（最多 150 字，当前 ${text.length} 字）` }))
-              return
-            }
-            const data = await surfcoreRequest('/qq/send', { method: 'POST', body: { text }, timeout: 15000 })
-            res.writeHead(data && data.ok ? 200 : 502, JSON_HEADERS)
-            res.end(JSON.stringify(data && data.ok ? { ok: true, message: data.message } : { ok: false, error: (data && data.error) || 'dsh-Dfy/桥接不可达' }))
-            return
-          }
-          if (url.searchParams.get('history')) {
-            const limit = Math.max(1, Math.min(120, Number(url.searchParams.get('limit')) || 40))
-            const data = await surfcoreRequest(`/qq/history?limit=${limit}`, { timeout: 10000 })
-            res.writeHead(200, JSON_HEADERS)
-            res.end(JSON.stringify(data && data.ok ? {
-              ok: true,
-              cursor: data.cursor,
-              owner: data.owner || null,
-              ownerKey: data.ownerKey || '',
-              messages: data.messages || [],
-            } : { ok: false, error: (data && data.error) || 'dsh-Dfy 不可达', messages: [] }))
-            return
-          }
-          const since = url.searchParams.get('since')
-          const wait = Math.max(0, Math.min(25000, Number(url.searchParams.get('wait')) || 0))
-          const q = new URLSearchParams({ wait: String(wait), client: 'whale-widget' })
-          if (since !== null && since !== '' && since !== 'null') q.set('since', since)
-          // v882（审查发现，稳定性）：长轮询（前端固定 wait=20000）期间若页面刷新/关闭，
-          //   浏览器会断开这条 GET，但旧实现仍会把上游请求跑满 wait+8s（最坏 28 秒）才释放。
-          //   现在把"客户端断开"接到上游 fetch 的 AbortController 上，让连接与定时器立刻回收。
-          const ac = new AbortController()
-          let clientGone = false
-          const onClientClose = () => {
-            if (!res.writableEnded) { clientGone = true; try { ac.abort() } catch (err) {} }
-          }
-          try { req.on('close', onClientClose) } catch (err) {}
-          let data = null
-          try {
-            data = await surfcoreRequest(`/events?${q.toString()}`, { timeout: wait + 8000, signal: ac.signal })
-          } finally {
-            try { req.off('close', onClientClose) } catch (err) {}
-          }
-          // 客户端已经走了：不再往一个已断开的响应上写（旧实现在这里会触发 write-after-end 类噪音）
-          if (clientGone || res.destroyed || res.writableEnded) return
-          if (!data || !data.ok) {
-            res.writeHead(200, JSON_HEADERS)
-            res.end(JSON.stringify({ ok: false, error: (data && data.error) || 'dsh-Dfy 不可达', events: [] }))
-            return
-          }
-          res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify({
-            ok: true,
-            bootId: data.bootId || '',
-            cursor: Number(data.cursor) || 0,
-            // qq-message：QQ 私聊收发；proactive：SurfCore 主动搭话；reply：对话/测试回复。
-            // 三类都透传给挂件，由前端决定进气泡还是进消息卡。
-            events: (Array.isArray(data.events) ? data.events : []).filter((e) => e && (e.type === 'qq-message' || e.type === 'proactive' || e.type === 'reply')),
-          }))
-        } catch (err) {
-          try {
-            // v882：读体超限（BODY_TOO_LARGE）带 status=413 —— 照抄它，别一律报 500
-            res.writeHead(Number(err && err.status) || 500, JSON_HEADERS)
-            res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err).slice(0, 200) }))
-          } catch (e) {}
-        }
-      },
+      handler: qqSyncHandler,
     }))
 
     // 朗读合成：卡片/气泡「念出来」用 Edge TTS（与 QQ 语音条同一音色）。
@@ -4677,31 +3994,7 @@ export default {
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/tts.json',
-      handler: async (req, res) => {
-        try {
-          const url = new URL(req.url || '/', 'http://127.0.0.1')
-          const text = String(url.searchParams.get('text') || '').trim()
-          if (!text) {
-            res.writeHead(400, JSON_HEADERS)
-            res.end(JSON.stringify({ ok: false, error: '缺少 text' }))
-            return
-          }
-          // 合成要等 Edge 端点，给足超时（默认合成总时限 60s）
-          const data = await surfcoreRequest(`/tts?text=${encodeURIComponent(text.slice(0, 300))}`, { timeout: 70000 })
-          if (!data || !data.ok) {
-            res.writeHead(502, JSON_HEADERS)
-            res.end(JSON.stringify({ ok: false, error: (data && data.error) || '语音合成不可用' }))
-            return
-          }
-          res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: true, url: data.url, durationMs: data.durationMs, text: data.text, volume: data.volume }))
-        } catch (err) {
-          try {
-            res.writeHead(Number(err && err.status) || 500, JSON_HEADERS)
-            res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err).slice(0, 200) }))
-          } catch (e) {}
-        }
-      },
+      handler: ttsHandler,
     }))
 
     disposers.push(registerRoute({
@@ -4724,616 +4017,62 @@ export default {
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/roles.json',
-      handler: async (req, res) => {
-        if (req.method === 'POST' || req.method === 'PUT') {
-          try {
-            // 放宽到 30MB：支持最大 20MB 的 GIF（base64 膨胀约 1.33 倍）
-            const body = await readBodyMax(req, 30 * 1024 * 1024)
-            const parsed = JSON.parse(body)
-            const name = String(parsed.name || '').trim().slice(0, 20) || '新角色'
-            const image = String(parsed.image || '')
-            const m = /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/=]+)$/.exec(image)
-            if (!m) {
-              res.writeHead(400, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: false, error: 'invalid image data' }))
-              return
-            }
-            const buf = Buffer.from(m[2], 'base64')
-            if (buf.length < 8 || buf.length > 20 * 1024 * 1024) {
-              res.writeHead(400, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: false, error: 'image too large' }))
-              return
-            }
-            // format：客户端显式告知 gif/apng（APNG 的 dataURL 是 image/png，需客户端区分）；
-            // 未显式给时按 dataURL 的 MIME 推断（gif→gif，其余 png）
-            const declared = parsed.format === 'gif' ? 'gif' : (parsed.format === 'apng' ? 'apng' : null)
-            const fmt = declared || (m[1] === 'gif' ? 'gif' : 'png')
-            const id = 'role_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)
-            const dir = pickRoleDir()
-            fs.writeFileSync(path.join(dir, id + '.' + roleFileExt(fmt)), buf)
-            const index = readRolesIndex()
-            index.roles.push({ id, name, format: fmt, pinnedAt: null, createdAt: Date.now() })
-            writeRolesIndex(index)
-            res.writeHead(200, JSON_HEADERS)
-            res.end(JSON.stringify(rolesPayload()))
-          } catch (err) {
-            res.writeHead(400, JSON_HEADERS)
-            res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err).slice(0, 200) }))
-          }
-          return
-        }
-        res.writeHead(200, JSON_HEADERS)
-        res.end(JSON.stringify(rolesPayload()))
-      },
+      handler: rolesHandler,
     }))
 
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/role-pin.json',
-      handler: async (req, res) => {
-        try {
-          // v882（审查发现）：这两个写接口原来**不看方法**——只要带 JSON body 就落盘（GET/DELETE 也行）。
-          //   前端固定用 POST；补上方法校验后，非写方法一律 405，语义与其它写接口一致。
-          if (req.method !== 'POST' && req.method !== 'PUT') {
-            res.writeHead(405, { ...JSON_HEADERS, Allow: 'POST, PUT' })
-            res.end(JSON.stringify({ ok: false, error: '不支持的请求方法' }))
-            return
-          }
-          const body = await readBodyMax(req, 8192)
-          const parsed = JSON.parse(body)
-          const id = String(parsed.id || '')
-          const { index, role } = roleIndexFind(id)
-          if (!role) {
-            res.writeHead(404, JSON_HEADERS)
-            res.end(JSON.stringify({ ok: false, error: 'role not found' }))
-            return
-          }
-          role.pinnedAt = parsed.pinned === true ? Date.now() : null
-          writeRolesIndex(index)
-          res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify(rolesPayload()))
-        } catch (err) {
-          res.writeHead(400, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err).slice(0, 200) }))
-        }
-      },
+      handler: rolePinHandler,
     }))
 
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/role-delete.json',
-      handler: async (req, res) => {
-        try {
-          if (req.method !== 'POST' && req.method !== 'PUT') {
-            res.writeHead(405, { ...JSON_HEADERS, Allow: 'POST, PUT' })
-            res.end(JSON.stringify({ ok: false, error: '不支持的请求方法' }))
-            return
-          }
-          const body = await readBodyMax(req, 8192)
-          const parsed = JSON.parse(body)
-          const id = String(parsed.id || '')
-          if (id === ROLE_DEFAULT_ID) {
-            res.writeHead(400, JSON_HEADERS)
-            res.end(JSON.stringify({ ok: false, error: 'cannot delete default role' }))
-            return
-          }
-          const { index, role } = roleIndexFind(id)
-          if (!role) {
-            res.writeHead(404, JSON_HEADERS)
-            res.end(JSON.stringify({ ok: false, error: 'role not found' }))
-            return
-          }
-          // 先按角色 format 确定文件路径（必须在从索引移除之前，否则查不到 format 默认成 png，删不掉 .gif）
-          const fmt = role.format === 'gif' || role.format === 'apng' ? role.format : 'png'
-          const p = roleFilePath(id, fmt)
-          index.roles = index.roles.filter((r) => r.id !== id)
-          writeRolesIndex(index)
-          if (p) { try { fs.unlinkSync(p) } catch (err) {} }
-          res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify(rolesPayload()))
-        } catch (err) {
-          res.writeHead(400, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err).slice(0, 200) }))
-        }
-      },
+      handler: roleDeleteHandler,
     }))
 
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/role-image.png',
-      handler: (req, res) => {
-        try {
-          const id = roleIdFromUrl(req.url)
-          const p = roleImagePath(id)
-          if (!p) throw new Error('bad role id')
-          const bytes = fs.readFileSync(p)
-          // 按角色格式返回对应 MIME：gif 动图 → image/gif；png/apng 都是 PNG 容器 → image/png
-          const { role } = roleIndexFind(id)
-          const mime = role && role.format === 'gif' ? 'image/gif' : 'image/png'
-          res.writeHead(200, {
-            'Content-Type': mime,
-            'Cache-Control': 'no-store',
-            'Content-Length': String(bytes.length),
-          })
-          res.end(bytes)
-        } catch (err) {
-          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
-          res.end('role image unavailable')
-        }
-      },
+      handler: roleImageHandler,
     }))
 
-    // ===== 表情素材层：自描述素材包（每个包一个 <packId>/ 目录，内含 pack.json + 图片）=====
-    // 为什么是「自描述素材包」而不是硬编码白名单：plus 的实现把 4 套共 115 个文件名硬编码成一张
-    // 全局并集白名单（不分版本），实测每版有 63~78 个"白名单里有、该版目录里没有"的死条目，
-    // 请求必然 404；且它的 exprShowCute 把字符串当对象取 .name，使「随机卖萌」实际从未生效。
-    // 本层改为：清单里只保留**真实存在**的文件，前端拿到的每个名字都取得到图，从结构上消除这类问题。
-    // 字节不常驻内存；清单 5s 低频缓存；图片走 ETag 协商缓存 —— 眨眼/卖萌会频繁切图，而官方其余
-    // 路由一律 no-store（每切一次就要重下整张 ~700KB 图）。
-    let exprPacksCache = null
-    let exprPacksCacheAt = 0
-    const exprEtags = new Map() // path -> { key, etag }；key = mtimeMs + ':' + size
-    function exprEtagsPut(p, key, etag) {
-      if (exprEtags.size > 512) exprEtags.clear() // 防无界增长（条目数天然有界：素材包里的图总数）
-      exprEtags.set(p, { key: key, etag: etag })
-    }
-    function exprFileOk(dir, name) {
-      // 用 lstat（**不是** stat）：符号链接的 isFile() 为 false ⇒ 指向包外的链接会被自动排除在清单之外。
-      // stat 会跟随链接，等于把包外文件当成素材（评审未能在本机创建符号链接实测，属预防性加固）。
-      try { return fs.lstatSync(path.join(dir, name)).isFile() } catch (err) { return false }
-    }
-    function readExprPack(dir, id) {
-      let raw = null
-      try { raw = JSON.parse(fs.readFileSync(path.join(dir, EXPR_PACK_FILE), 'utf8')) } catch (err) { return null }
-      if (!raw || typeof raw !== 'object') return null
-      const pickFile = (v) => (typeof v === 'string' && EXPR_FILE_NAME_RE.test(v) && v !== '.' && v !== '..' ? v : '')
-      const declared = new Set()
-      const pack = { id: id, label: id, main: '', blink: {}, moods: {}, cute: [], labels: {}, images: [] }
-      if (typeof raw.label === 'string' && raw.label) pack.label = String(raw.label).slice(0, 24)
-      const main = pickFile(raw.main)
-      if (main) declared.add(main)
-      if (raw.blink && typeof raw.blink === 'object') {
-        for (const k of ['half', 'closed']) {
-          const f = pickFile(raw.blink[k])
-          if (f) { pack.blink[k] = f; declared.add(f) }
-        }
-      }
-      if (raw.moods && typeof raw.moods === 'object') {
-        for (const k of ['angry', 'shy', 'disappointed', 'exhausted']) {
-          const f = pickFile(raw.moods[k])
-          if (f) { pack.moods[k] = f; declared.add(f) }
-        }
-      }
-      if (Array.isArray(raw.cute)) {
-        for (const v of raw.cute.slice(0, EXPR_CUTE_SCAN_MAX)) {
-          const f = pickFile(v)
-          if (f) declared.add(f)
-          if (declared.size >= EXPR_CUTE_MAX + 8) break
-        }
-      }
-      // 只保留盘上真实存在的：declared 里声明过但文件不在的一律剔除 ⇒ 清单不可能给出破图
-      const present = new Set()
-      for (const f of declared) if (exprFileOk(dir, f)) present.add(f)
-      pack.main = main && present.has(main) ? main : ''
-      for (const k of Object.keys(pack.blink)) if (!present.has(pack.blink[k])) delete pack.blink[k]
-      for (const k of Object.keys(pack.moods)) if (!present.has(pack.moods[k])) delete pack.moods[k]
-      if (Array.isArray(raw.cute)) {
-        const seen = new Set()
-        for (const v of raw.cute.slice(0, EXPR_CUTE_SCAN_MAX)) {
-          const f = pickFile(v)
-          if (!f || seen.has(f) || !present.has(f)) continue
-          seen.add(f)
-          pack.cute.push(f)
-          if (pack.cute.length >= EXPR_CUTE_MAX) break
-        }
-      }
-      // labels 两种写法都认：键为**文件名**（随包素材归档用的是这种写法），或键为**语义槽位**
-      // （main/half/closed/angry/shy/disappointed/exhausted）。输出统一按文件名作键 ——
-      // 前端是按文件遍历取显示名的。
-      if (raw.labels && typeof raw.labels === 'object') {
-        const slotFile = {
-          main: pack.main,
-          half: pack.blink.half,
-          closed: pack.blink.closed,
-          angry: pack.moods.angry,
-          shy: pack.moods.shy,
-          disappointed: pack.moods.disappointed,
-          exhausted: pack.moods.exhausted,
-        }
-        for (const k of Object.keys(raw.labels)) {
-          if (typeof raw.labels[k] !== 'string') continue
-          const target = present.has(k) ? k : (slotFile[k] && present.has(slotFile[k]) ? slotFile[k] : '')
-          if (target) pack.labels[target] = String(raw.labels[k]).slice(0, 24)
-        }
-      }
-      pack.images = Array.from(present)
-      const usable = pack.main || pack.cute.length || Object.keys(pack.moods).length || Object.keys(pack.blink).length
-      return usable ? pack : null
-    }
-    function scanExprPacks() {
-      const out = []
-      const seenIds = new Set()
-      for (const base of EXPR_DIR_CANDIDATES) {
-        let entries = []
-        try { entries = fs.readdirSync(base, { withFileTypes: true }) } catch (err) { continue }
-        for (const ent of entries) {
-          if (!ent.isDirectory()) continue
-          const id = ent.name
-          if (!EXPR_PACK_ID_RE.test(id) || seenIds.has(id)) continue
-          const pack = readExprPack(path.join(base, id), id)
-          if (pack) { seenIds.add(id); out.push(pack) }
-        }
-      }
-      return out
-    }
-    function listExprPacks() {
-      const now = Date.now()
-      if (exprPacksCache && now - exprPacksCacheAt < EXPR_PACKS_TTL_MS) return exprPacksCache
-      exprPacksCache = scanExprPacks()
-      exprPacksCacheAt = now
-      return exprPacksCache
-    }
-    // 素材路径解析：pack 必须是扫描到的包，name 必须是该包清单里的文件（双白名单 ⇒ 无路径穿越）
-    function exprImagePath(packId, name) {
-      if (!EXPR_PACK_ID_RE.test(packId) || !EXPR_FILE_NAME_RE.test(name)) return ''
-      const pack = listExprPacks().find((p) => p.id === packId)
-      if (!pack || pack.images.indexOf(name) === -1) return ''
-      for (const base of EXPR_DIR_CANDIDATES) {
-        const p = path.join(base, packId, name)
-        // 同 exprFileOk：用 lstat 排除符号链接（清单里本就不会出现链接名，这里是第二道口）
-        try { if (fs.lstatSync(p).isFile()) return p } catch (err) {}
-      }
-      return ''
-    }
+    // 表情素材层与桌宠动画实现已搬到 whale-assets-routes.mjs。
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/expr-packs.json',
-      handler: (req, res) => {
-        const packs = listExprPacks()
-        res.writeHead(200, JSON_HEADERS)
-        res.end(JSON.stringify({ ok: true, packs: packs }))
-      },
+      handler: exprPacksHandler,
     }))
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/expr.png',
-      handler: (req, res) => {
-        try {
-          const q = new URL(req.url, 'http://127.0.0.1').searchParams
-          const p = exprImagePath(String(q.get('pack') || ''), String(q.get('name') || ''))
-          if (!p) throw new Error('expression image not found')
-          let st = null
-          try { st = fs.statSync(p) } catch (err) { throw new Error('expression image unreadable') }
-          // 缓存键 = mtimeMs:size（**不做内容哈希** —— 那样每次请求都得把整张图读进内存做 sha256，
-          // 正好抵消掉这个缓存。代价是"同尺寸 + 同毫秒时间戳"的替换会被误判为未变（备份还原、
-          // 同一秒内 checkout）；此时客户端拿到的 304 会指向旧图，刷新页面/重启挂件即恢复。）
-          const key = st.mtimeMs + ':' + st.size
-          let etag = ''
-          // 算 ETag 时读到的字节要留着复用，否则下面发 body 还要把同一张大图再读一遍
-          let bytes = null
-          const cached = exprEtags.get(p)
-          if (cached && cached.key === key) {
-            etag = cached.etag
-          } else {
-            bytes = fs.readFileSync(p)
-            etag = '"' + createHash('sha256').update(bytes).digest('hex').slice(0, 20) + '"'
-            exprEtagsPut(p, key, etag)
-          }
-          // 命中即 304 无 body（也不必读整张图）—— 眨眼/卖萌高频切图时这是关键
-          // 按 RFC 语义比对：容忍弱校验前缀 `W/`、逗号分隔的多值列表、以及通配 `*`（原来只做 === 比较）
-          const inm = String(req.headers['if-none-match'] || '')
-          const inmHit = inm.split(',').some((t) => {
-            const v = t.trim().replace(/^W\//, '')
-            return v === '*' || v === etag
-          })
-          if (inmHit) {
-            res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache' })
-            res.end()
-            return
-          }
-          if (!bytes) bytes = fs.readFileSync(p)
-          res.writeHead(200, {
-            'Content-Type': 'image/png',
-            'Cache-Control': 'no-cache',
-            'ETag': etag,
-            'Content-Length': String(bytes.length),
-          })
-          res.end(bytes)
-        } catch (err) {
-          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
-          res.end('expression image unavailable')
-        }
-      },
+      handler: exprImageHandler,
     }))
 
-    // ===== 桌宠动画素材（内置角色形态「桌宠」的 webm 动画池）=====
-    // 素材随包在 assets/pet-video/*.webm（源自 dsh-pet，MIT，© PC2005-cloud；
-    // 出处与授权见 PROVENANCE.md）。动画名允许中文 ⇒ 不能走 EXPR_FILE_NAME_RE（仅 ASCII），
-    // 改为「盘上清单」白名单：扫一次目录，name 必须精确命中清单里的键，天然防路径穿越。
-    const PET_VIDEO_DIR = path.join(PACKAGE_ROOT, 'assets', 'pet-video')
-    let petVideoFiles = null // name -> filename 缓存（5 分钟 TTL，与表情清单同节奏）
-    let petVideoFilesAt = 0
-    // 素材是否缺失（目录不存在 / 为空）。issue #6：旧实现在目录缺失时静默返回空表，
-    // 前端只能弹一句笼统的「素材缺失」，用户不知道该把素材放哪、装哪个版本。
-    // 这里把「缺的原因」缓存下来，由 pet-animations.json 如实上报。
-    let petVideoMissingReason = ''
-    function petVideoList() {
-      const now = Date.now()
-      if (petVideoFiles && now - petVideoFilesAt < EXPR_PACKS_TTL_MS) return petVideoFiles
-      const map = {}
-      let reason = ''
-      try {
-        for (const ent of fs.readdirSync(PET_VIDEO_DIR)) {
-          if (/\.webm$/i.test(ent)) map[ent.replace(/\.webm$/i, '')] = ent
-        }
-        if (!Object.keys(map).length) reason = 'empty'
-      } catch (err) {
-        reason = (err && err.code) === 'ENOENT' ? 'dir-missing' : 'unreadable'
-      }
-      petVideoMissingReason = reason
-      petVideoFiles = map
-      petVideoFilesAt = now
-      return map
-    }
-    // 素材缺失时给用户的可执行指引（前端 toast / 控制台直接展示这一段）
-    function petVideoMissingHint() {
-      const why = petVideoMissingReason === 'dir-missing' ? '目录不存在' : (petVideoMissingReason === 'empty' ? '目录为空' : '目录不可读')
-      return '桌宠动画素材未安装（assets/pet-video/ ' + why + '）：请重装最新版 dsh-Dfy（github:louke6572/surfcore，不要锁旧 commit），' +
-        '或手动把 106 段 .webm 放进 ' + PET_VIDEO_DIR + ' 后刷新页面。'
-    }
+    // 桌宠动画素材与清单实现已搬到 whale-assets-routes.mjs。
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/pet-video.webm',
-      handler: (req, res) => {
-        try {
-          const q = new URL(req.url, 'http://127.0.0.1').searchParams
-          const name = String(q.get('name') || '')
-          // v882：清单是普通对象，`list[name]` 对 __proto__/constructor 会命中原型链拿到非字符串，
-          //   后面 path.join() 会抛 TypeError（虽然被本路由 catch 成 404，但没必要走到抛错那一步）。
-          const list = petVideoList()
-          const file = Object.prototype.hasOwnProperty.call(list, name) ? list[name] : ''
-          if (!file) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }); res.end('pet animation not found'); return }
-          const p = path.join(PET_VIDEO_DIR, file)
-          let st = null
-          try { st = fs.lstatSync(p) } catch (err) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('pet animation unreadable'); return }
-          if (!st.isFile()) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('pet animation unreadable'); return }
-          const key = st.mtimeMs + ':' + st.size
-          const cached = exprEtags.get(p)
-          const etag = cached && cached.key === key ? cached.etag : '"size-' + st.size + '-' + Math.round(st.mtimeMs) + '"'
-          exprEtagsPut(p, key, etag)
-          const inm = String(req.headers['if-none-match'] || '')
-          if (inm.split(',').some((t) => { const v = t.trim().replace(/^W\//, ''); return v === '*' || v === etag })) {
-            res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache' })
-            res.end()
-            return
-          }
-          // <video> 播放常带 Range 请求（分块加载）；不支持 Range 会让部分浏览器直接放弃播放
-          const total = st.size
-          const range = String(req.headers.range || '')
-          const m = /^bytes=(\d*)-(\d*)$/.exec(range)
-          if (m && (m[1] || m[2])) {
-            let start = 0
-            let end = total - 1
-            if (!m[1] && m[2]) {
-              // 后缀区间 bytes=-N：要**最后** N 字节。旧实现把它当成 0 开头，播放器 seek 到尾部会拿到错误数据块。
-              const n = parseInt(m[2], 10)
-              if (!isFinite(n) || n <= 0) {
-                res.writeHead(416, { 'Content-Range': 'bytes */' + total })
-                res.end()
-                return
-              }
-              start = Math.max(0, total - n)
-            } else {
-              start = m[1] ? parseInt(m[1], 10) : 0
-              end = m[2] ? parseInt(m[2], 10) : total - 1
-              if (end >= total) end = total - 1
-            }
-            if (!isFinite(start) || !isFinite(end) || start > end || end >= total) {
-              res.writeHead(416, { 'Content-Range': 'bytes */' + total })
-              res.end()
-              return
-            }
-            const fd = fs.openSync(p, 'r')
-            try {
-              const buf = Buffer.alloc(end - start + 1)
-              fs.readSync(fd, buf, 0, buf.length, start)
-              res.writeHead(206, {
-                'Content-Type': 'video/webm',
-                'Content-Range': 'bytes ' + start + '-' + end + '/' + total,
-                'Accept-Ranges': 'bytes',
-                'Content-Length': String(buf.length),
-                'Cache-Control': 'no-cache',
-                'ETag': etag,
-              })
-              res.end(buf)
-            } finally { fs.closeSync(fd) }
-            return
-          }
-          const bytes = fs.readFileSync(p)
-          res.writeHead(200, {
-            'Content-Type': 'video/webm',
-            'Accept-Ranges': 'bytes',
-            'Content-Length': String(bytes.length),
-            'Cache-Control': 'no-cache',
-            'ETag': etag,
-          })
-          res.end(bytes)
-        } catch (err) {
-          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
-          res.end('pet animation unavailable')
-        }
-      },
+      handler: petVideoHandler,
     }))
     // 桌宠动画清单（前端拉取 + 校验素材在位；分类/权重内置在前端，与 dsh-pet 同源）
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/pet-animations.json',
-      handler: (req, res) => {
-        try {
-          const files = Object.keys(petVideoList())
-          res.writeHead(200, JSON_HEADERS)
-          if (!files.length) {
-            // 素材未安装：不能再回 ok:true + 空数组（前端会静默回退，用户一脸懵）。
-            // 保留 200 让前端能解析，用 ok:false + reason/hint 明确告诉它和用户怎么回事。
-            res.end(JSON.stringify({
-              ok: false,
-              error: 'pet-assets-missing',
-              reason: petVideoMissingReason || 'empty',
-              animations: [],
-              dir: PET_VIDEO_DIR,
-              hint: petVideoMissingHint(),
-            }))
-            return
-          }
-          res.end(JSON.stringify({ ok: true, animations: files }))
-        } catch (err) {
-          res.writeHead(500, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err).slice(0, 160) }))
-        }
-      },
+      handler: petAnimationsHandler,
     }))
 
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/audio.json',
-      handler: async (req, res) => {
-        if (req.method === 'POST' || req.method === 'PUT') {
-          try {
-            const body = await readBodyMax(req, 8 * 1024 * 1024)
-            const parsed = JSON.parse(body)
-            const action = parsed.action
-            const index = readAudioIndex()
-            if (action === 'upload-fragment') {
-              const name = String(parsed.name || '').trim().slice(0, 40) || '未命名音频'
-              const audio = String(parsed.audio || '')
-              const m = /^data:audio\/wav;base64,([A-Za-z0-9+/=]+)$/.exec(audio)
-              if (!m) {
-                res.writeHead(400, JSON_HEADERS)
-                res.end(JSON.stringify({ ok: false, error: 'invalid wav data' }))
-                return
-              }
-              const buf = Buffer.from(m[1], 'base64')
-              if (buf.length < 44 || buf.length > 8 * 1024 * 1024) {
-                res.writeHead(400, JSON_HEADERS)
-                res.end(JSON.stringify({ ok: false, error: 'audio too large' }))
-                return
-              }
-              const id = 'audio_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)
-              fs.writeFileSync(path.join(pickAudioDir(), id + '.wav'), buf)
-              index.fragments.push({ id, name, createdAt: Date.now() })
-              writeAudioIndex(index)
-              res.writeHead(200, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: true, id, fragments: audioFragmentsPayload() }))
-              return
-            }
-            if (action === 'save-group') {
-              const id = String(parsed.id || '')
-              const name = String(parsed.name || '').trim().slice(0, 20) || '未命名音效组'
-              const press = String(parsed.press ?? '')
-              const release = String(parsed.release ?? '')
-              // 校验引用片段存在（预设或自定义）；空字符串=该槽留空(该事件静音)，允许保存
-              const frags = audioFragmentsPayload().map((f) => f.id)
-              const validPress = press === '' ? '' : (frags.includes(press) ? press : PRESET_GROUPS.duck.press)
-              const validRelease = release === '' ? '' : (frags.includes(release) ? release : PRESET_GROUPS.duck.release)
-              if (id && index.groups.some((g) => g.id === id)) {
-                const g = index.groups.find((x) => x.id === id)
-                g.name = name
-                g.press = validPress
-                g.release = validRelease
-              } else {
-                const gid = 'group_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)
-                index.groups.push({ id: gid, name, press: validPress, release: validRelease, pinnedAt: null, createdAt: Date.now() })
-              }
-              writeAudioIndex(index)
-              res.writeHead(200, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: true, groups: audioGroupsPayload() }))
-              return
-            }
-            if (action === 'delete-group') {
-              const id = String(parsed.id || '')
-              if (PRESET_GROUPS[id]) {
-                res.writeHead(400, JSON_HEADERS)
-                res.end(JSON.stringify({ ok: false, error: 'cannot delete preset group' }))
-                return
-              }
-              index.groups = index.groups.filter((g) => g.id !== id)
-              writeAudioIndex(index)
-              res.writeHead(200, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: true, groups: audioGroupsPayload() }))
-              return
-            }
-            if (action === 'delete-fragment') {
-              const id = String(parsed.id || '')
-              if (PRESET_FRAGMENTS[id]) {
-                res.writeHead(400, JSON_HEADERS)
-                res.end(JSON.stringify({ ok: false, error: 'cannot delete preset fragment' }))
-                return
-              }
-              index.fragments = index.fragments.filter((f) => f.id !== id)
-              writeAudioIndex(index)
-              const p = audioFragmentPath(id)
-              if (p) { try { fs.unlinkSync(p) } catch (err) {} }
-              res.writeHead(200, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: true, fragments: audioFragmentsPayload(), groups: audioGroupsPayload() }))
-              return
-            }
-            if (action === 'pin-group') {
-              const id = String(parsed.id || '')
-              const g = index.groups.find((x) => x.id === id)
-              if (!g) {
-                res.writeHead(404, JSON_HEADERS)
-                res.end(JSON.stringify({ ok: false, error: 'group not found' }))
-                return
-              }
-              g.pinnedAt = parsed.pinned === true ? Date.now() : null
-              writeAudioIndex(index)
-              res.writeHead(200, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: true, groups: audioGroupsPayload() }))
-              return
-            }
-            res.writeHead(400, JSON_HEADERS)
-            res.end(JSON.stringify({ ok: false, error: 'unknown action' }))
-          } catch (err) {
-            res.writeHead(400, JSON_HEADERS)
-            res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err).slice(0, 200) }))
-          }
-          return
-        }
-        res.writeHead(200, JSON_HEADERS)
-        res.end(JSON.stringify(audioPayload()))
-      },
+      handler: audioHandler,
     }))
 
     // v860（issue #226）：路由**不再以 .wav 结尾** —— 带后缀的 URL 会被部分环境（下载器/扩展/反代）
-    //   当成"下载文件"劫持，导致试听与任务结束音无声。Content-Type 由 fragmentMime() 决定，
-    //   与 URL 后缀无关 ⇒ 改成无后缀路径，同时**保留旧路径作为兼容别名**（老客户端仍能用）。
-    const audioFragmentHandler = (req, res) => {
-        try {
-          const id = audioIdFromUrl(req.url)
-          const bytes = loadAudioFragmentBytes(id)
-          if (!bytes) throw new Error('bad fragment id')
-          // 预设/内置片段可能是 mp3 也可能是 wav —— Content-Type 必须与字节匹配，
-          // 否则浏览器解码路径/加载行为异常（MIME 与字节不符会导致听感差异）
-          const mime = fragmentMime(id)
-          res.writeHead(200, {
-            'Content-Type': mime,
-            'Cache-Control': 'no-store',
-            'Content-Length': String(bytes.length),
-          })
-          res.end(bytes)
-        } catch (err) {
-          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
-          res.end('audio fragment unavailable')
-        }
-      }
+    //   当成"下载文件"劫持，导致试听与任务结束音无声。实现见 whale-roles-audio-routes.mjs。
     disposers.push(registerRoute({ kind: 'exact', path: '/dsh-whale/audio-fragment', handler: audioFragmentHandler }))
     disposers.push(registerRoute({ kind: 'exact', path: '/dsh-whale/audio-fragment.wav', handler: audioFragmentHandler }))
-
-    // 片段字节对应的 MIME：内置/预设片段按声明，自定义片段一律 wav
-    function fragmentMime(fragId) {
-      const f = PRESET_FRAGMENTS[fragId]
-      return (f && f.mime) || 'audio/wav'
-    }
 
     function loadSound(candidates) {
       // v882（审查发现）：?set=__proto__ / ?set=constructor 这类 URL 参数会让上层的
@@ -5349,168 +4088,26 @@ export default {
       return null
     }
 
-    function serveSound(req, res, candidates) {
-      const bytes = loadSound(candidates)
-      if (!bytes) {
-        // v752：404 也带 no-store。原来只有 200 分支有缓存头，失败的响应可能被浏览器/中间层
-        // 缓存住，一旦缓存就会变成"永久没声音、刷新也没用"。
-        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
-        res.end('sound unavailable')
-        return
-      }
-      res.writeHead(200, {
-        'Content-Type': 'audio/mpeg',
-        'Cache-Control': 'no-store',
-        'Content-Length': String(bytes.length),
-      })
-      res.end(bytes)
-    }
-
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/sound/press.mp3',
-      handler: (req, res) => {
-        // v882：只认 SOUND_SETS **自有**键 —— 直接用 `SOUND_SETS[setName]` 会让 __proto__/constructor
-        //   命中原型链，被当成"已知预设组"，既不回退默认音效也不去查用户自定义组。
-        const setName = soundSetFromUrl(req.url)
-        const isPresetSet = Object.prototype.hasOwnProperty.call(SOUND_SETS, setName)
-        const set = isPresetSet ? SOUND_SETS[setName] : SOUND_SETS.duck
-        // 自定义音效组：set 为组 id 时按组内 press 片段取音频
-        if (setName && !isPresetSet) {
-          const fragId = groupFragmentId(setName, 'press')
-          if (fragId === '') { res.writeHead(204, { 'Cache-Control': 'no-store' }); res.end(); return } // 留空槽：该事件静音（v752：补 no-store，空响应不允许被缓存）
-          const bytes = loadAudioFragmentBytes(fragId)
-          if (bytes) {
-            res.writeHead(200, {
-              'Content-Type': fragmentMime(fragId),
-              'Cache-Control': 'no-store',
-              'Content-Length': String(bytes.length),
-            })
-            res.end(bytes)
-            return
-          }
-        }
-        serveSound(req, res, set.press)
-      },
+      handler: pressSoundHandler,
     }))
 
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/sound/release.mp3',
-      handler: (req, res) => {
-        const setName = soundSetFromUrl(req.url)
-        const isPresetSet = Object.prototype.hasOwnProperty.call(SOUND_SETS, setName)
-        const set = isPresetSet ? SOUND_SETS[setName] : SOUND_SETS.duck
-        if (setName && !isPresetSet) {
-          const fragId = groupFragmentId(setName, 'release')
-          if (fragId === '') { res.writeHead(204, { 'Cache-Control': 'no-store' }); res.end(); return } // 留空槽：该事件静音（v752：补 no-store，空响应不允许被缓存）
-          const bytes = loadAudioFragmentBytes(fragId)
-          if (bytes) {
-            res.writeHead(200, {
-              'Content-Type': fragmentMime(fragId),
-              'Cache-Control': 'no-store',
-              'Content-Length': String(bytes.length),
-            })
-            res.end(bytes)
-            return
-          }
-        }
-        serveSound(req, res, set.release)
-      },
+      handler: releaseSoundHandler,
     }))
 
     // 桌宠语音：点击回应 / 拖拽甩出 / 硬落地 / Q 弹落地，四条固定语音，按 name 取盘
-    const PET_VOICE_FILES = {
-      bing: 'voice-bing.mp3',
-      heng: 'voice-heng.mp3',
-      weiqu: 'voice-weiqu.mp3',
-      qtan: 'voice-qtan.mp3',
-    }
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/sound/voice.mp3',
-      handler: (req, res) => {
-        let name = ''
-        try { name = new URL(req.url, 'http://local').searchParams.get('name') || '' } catch (err) {}
-        // v882（审查发现）：`PET_VOICE_FILES[name]` 对 __proto__/constructor 会命中原型链，
-        //   拿到的不是字符串，path.join() 直接 TypeError（旧版是未处理拒绝）⇒ 用自有键判断。
-        const file = Object.prototype.hasOwnProperty.call(PET_VOICE_FILES, name) ? PET_VOICE_FILES[name] : ''
-        if (!file) {
-          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
-          res.end('voice unavailable')
-          return
-        }
-        serveSound(req, res, [path.join(PACKAGE_ROOT, 'assets', file)])
-      },
+      handler: voiceSoundHandler,
     }))
 
-    function pickBubbleImgDir() {
-      for (const p of BUBBLE_IMG_DIR_CANDIDATES) {
-        try {
-          fs.mkdirSync(p, { recursive: true })
-          fs.accessSync(p, fs.constants.W_OK)
-          return p
-        } catch (err) {}
-      }
-      return BUBBLE_IMG_DIR_CANDIDATES[0]
-    }
-    function defaultBubbleImgIndex() {
-      return { version: 1, images: [] }
-    }
-    function readBubbleImgIndex() {
-      try {
-        const parsed = JSON.parse(fs.readFileSync(path.join(pickBubbleImgDir(), BUBBLE_IMG_INDEX_NAME), 'utf8'))
-        if (parsed && Array.isArray(parsed.images)) return parsed
-      } catch (err) {}
-      return defaultBubbleImgIndex()
-    }
-    function writeBubbleImgIndex(index) {
-      try {
-        fs.writeFileSync(path.join(pickBubbleImgDir(), BUBBLE_IMG_INDEX_NAME), JSON.stringify(index, null, 2), 'utf8')
-        return true
-      } catch (err) {
-        return false
-      }
-    }
-    function bubbleImgPayload() {
-      const index = readBubbleImgIndex()
-      // 内置默认图常驻(先列出,不占 createdAt 排序;用户图库含同 id 时不重复)
-      const seen = {}
-      index.images.forEach((im) => { seen[im.id] = 1 })
-      const builtins = DEFAULT_BUBBLE_IMGS.filter((d) => !seen[d.id]).map((d) => ({
-        id: d.id,
-        name: String(d.name || d.id),
-        format: d.format === 'gif' ? 'gif' : 'png',
-        url: '/dsh-whale/bubble-img.png?id=' + encodeURIComponent(d.id),
-        createdAt: null,
-        builtin: true,
-      }))
-      return {
-        ok: true,
-        images: builtins.concat(index.images.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).map((im) => ({
-          id: im.id,
-          name: String(im.name || im.id),
-          format: im.format === 'gif' ? 'gif' : 'png',
-          url: '/dsh-whale/bubble-img.png?id=' + encodeURIComponent(im.id),
-          createdAt: im.createdAt || null,
-        }))),
-      }
-    }
-    function bubbleImgIdFromUrl(url) {
-      try {
-        const q = String(url || '').split('?')[1] || ''
-        const m = /(?:^|&)id=([^&]+)/.exec(q)
-        return m ? decodeURIComponent(m[1]) : ''
-      } catch (err) { return '' }
-    }
-    // v882（审查发现，防御性加固）：泡泡图 id 只有两种合法来源（上传时生成 / 内置清单），
-    //   但读盘用的索引文件是**用户可编辑的** —— 一旦索引里出现 `../../` 之类 id，
-    //   直接 path.join(dir, id + '.png') 就会越出图库目录。这里与角色图/音频片段保持同一套字符校验。
-    const BUBBLE_IMG_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
-    function bubbleImgFilePath(id, format) {
-      if (typeof id !== 'string' || !BUBBLE_IMG_ID_RE.test(id)) return null
-      return path.join(pickBubbleImgDir(), id + '.' + (format === 'gif' ? 'gif' : 'png'))
-    }
+    // 泡泡图库读写实现已搬到 whale-assets-routes.mjs。
     // ===== v829（issue #258）：`.dshw-bubble.json` 是**全量替换** =====
     // 文件里的 items 就是整条序列 —— 出厂快照（BUBBLE_DEFAULT_ITEMS）只在**读不到文件**时兜底。
     // 从外部手写这个文件的人很容易以为它是「增量补几句台词」，结果整条序列被替换掉：
@@ -5576,171 +4173,7 @@ export default {
       }
       return null
     }
-    // ===== v815：自定义泡泡框 —— 宿主侧净化 =====
-    // 用户可以在"泡泡框"里写 SVG 代码 ⇒ 这些片段最终会进 innerHTML ⇒ **必须白名单化**：
-    //   · 只放行无脚本、无外链的几何标签；
-    //   · 标签属性只放行几何/描边类；
-    //   · 直接删掉 <script>/<foreignObject>/on* 事件/href(javascript:)/style 里的 url()、expression。
-    // 探针 `_v815-frame-lib-check.mjs` 带一批负样本（见 §验证），改这里必须同步那些断言。
-    const FRAME_SVG_TAGS = ['path', 'ellipse', 'circle', 'rect', 'polygon', 'polyline', 'g']
-    // v828：补 `r`（`<circle>` 的半径）—— 标签在白名单里却漏了属性，用户写 `<circle r="30"/>` 会被剥成画不出来
-    const FRAME_SVG_ATTRS = ['d', 'points', 'cx', 'cy', 'r', 'rx', 'ry', 'x', 'y', 'width', 'height', 'fill', 'stroke',
-      'stroke-width', 'stroke-dasharray', 'stroke-linejoin', 'stroke-linecap', 'transform', 'opacity', 'fill-opacity', 'stroke-opacity']
-    function frameColorOk(v, def) {
-      const s = String(v == null ? '' : v).trim()
-      if (/^#[0-9a-fA-F]{3}$/.test(s) || /^#[0-9a-fA-F]{6}$/.test(s)) return s
-      if (/^rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(,\s*(0|1|0?\.\d+)\s*)?\)$/.test(s)) return s
-      if (s === 'transparent' || s === 'none') return s
-      return def
-    }
-    function frameNumIn(v, def, min, max) {
-      const n = Number(v)
-      let x = isFinite(n) ? n : def
-      if (typeof min === 'number' && x < min) x = min
-      if (typeof max === 'number' && x > max) x = max
-      return Math.round(x * 1000) / 1000
-    }
-    function frameSvgSanitize(code) {
-      let s = String(code == null ? '' : code).slice(0, 8000)
-      if (!s) return ''
-      // 整块危险元素直接删（含内容）
-      s = s.replace(/<\s*(script|foreignObject|style|iframe|image|use|animate|set)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
-      s = s.replace(/<\s*(script|foreignObject|style|iframe|image|use|animate|set)\b[^>]*\/?>/gi, '')
-      // 只保留白名单标签；其它标签（含自闭合）整体删除
-      s = s.replace(/<\s*\/?\s*([A-Za-z][\w:-]*)((?:[^>"']|"[^"]*"|'[^']*')*)\/?>/g, (m0, tag, attrs) => {
-        const t = String(tag)
-        if (FRAME_SVG_TAGS.indexOf(t) < 0) return ''
-        const closing = /^<\s*\//.test(m0)
-        // v823（P2）：**保住自闭合的斜杠**。P0 首版一律重拼成 `<tag …>`，而内联 SVG 里 `<path>` 不是空元素
-        //   ⇒ HTML 解析器会把后面的兄弟塞进它里面（`<path a/><path b/>` → path a > path b，子节点不渲染）
-        //   ⇒ 用户写的多形状自定义 SVG 只有第一个能显示。P2 才引入"自定义 SVG 代码"，所以坑到这时才暴露。
-        const selfClose = /\/\s*>$/.test(m0)
-        let out = '<' + (closing ? '/' : '') + t
-        if (!closing) {
-          const re = /([A-Za-z][\w:-]*)\s*=\s*("([^"]*)"|'([^']*)')/g
-          let m
-          let kept = 0
-          while ((m = re.exec(attrs))) {
-            // 零长度匹配会让 lastIndex 原地不动 → 死循环。
-            if (m[0].length === 0) break
-            const name = String(m[1]).toLowerCase()
-            const val = String(m[3] !== undefined ? m[3] : m[4])
-            if (FRAME_SVG_ATTRS.indexOf(name) < 0) continue
-            // 值里也不许出现 javascript:/url(/expression
-            if (/javascript:|url\s*\(|expression\s*\(/i.test(val)) continue
-            if (/[<>]/.test(val)) continue
-            out += ' ' + name + '="' + val.replace(/"/g, '&quot;') + '"'
-            kept++
-          }
-          void kept
-        }
-        return out + ((selfClose && !closing) ? '/>' : '>')
-      })
-      // v818（自检发现）：再**清掉标签之外的所有裸文本**。为什么必须做：`<script>alert(1)`（未闭合）这类输入，
-      //   块删除与标签白名单都只处理"标签"，会留下裸文本 `alert(1)` —— 它在 SVG 里是惰性文本、不会执行，
-      //   但把与形状无关的文字塞进 innerHTML 没有意义，也少留一条"文本被解释"的可能性。
-      //   属性值里不可能含 < >（上面的属性白名单已拒），所以按 <…> 切分是安全的。
-      s = s.replace(/[^<>]+(?=<|$)/g, '')
-      return s
-    }
-    function frameSanitizeOne(raw, idx) {
-      const s = raw && typeof raw === 'object' ? raw : {}
-      let id = String(s.id == null ? '' : s.id).trim().slice(0, 64)
-      if (!id) id = 'frame_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6)
-      const slotsIn = s.slots && typeof s.slots === 'object' ? s.slots : {}
-      function slot(kind) {
-        const d = slotsIn[kind] && typeof slotsIn[kind] === 'object' ? slotsIn[kind] : {}
-        const paint = d.paint && typeof d.paint === 'object' ? d.paint : {}
-        const out = {
-          dx: frameNumIn(d.dx, 0, -1026, 1026),
-          dy: frameNumIn(d.dy, 0, -700, 700),
-          scale: frameNumIn(d.scale, 1, 0.2, 4),
-          kind: d.kind === 'image' ? 'image' : 'svg',
-          svgPreset: ['classic', 'roundrect', 'zigzag', 'custom'].indexOf(String(d.svgPreset)) >= 0 ? String(d.svgPreset) : 'classic',
-          svgCode: frameSvgSanitize(d.svgCode),
-          imgId: String(d.imgId == null ? '' : d.imgId).slice(0, 64),
-          imgScale: frameNumIn(d.imgScale, 1, 0.1, 6),
-          imgOpacity: frameNumIn(d.imgOpacity, 1, 0, 1),
-          paint: {
-            bgOn: paint.bgOn === undefined ? true : paint.bgOn !== false,
-            bg: frameColorOk(paint.bg, '#FFFFFF'),
-            bgAlpha: frameNumIn(paint.bgAlpha, 1, 0, 1),
-            lineOn: paint.lineOn === undefined ? true : paint.lineOn !== false,
-            line: frameColorOk(paint.line, '#203170'),
-            lineW: frameNumIn(paint.lineW, 18, 0, 120),
-            lineAlpha: frameNumIn(paint.lineAlpha, 1, 0, 1),
-            dashOn: paint.dashOn === true,
-            dash: /^[0-9][0-9.,\s]*$/.test(String(paint.dash == null ? '' : paint.dash).trim()) ? String(paint.dash).trim().slice(0, 40) : '0',
-            cap: ['butt', 'square', 'round'].indexOf(String(paint.cap)) >= 0 ? String(paint.cap) : 'round',
-            join: ['miter', 'bevel', 'round'].indexOf(String(paint.join)) >= 0 ? String(paint.join) : 'round',
-          },
-        }
-        if (kind === 'small1' || kind === 'small2') out.on = d.on === undefined ? true : d.on !== false
-        return out
-      }
-      const safe = s.safe && typeof s.safe === 'object' ? s.safe : {}
-      const w = frameNumIn(safe.w, 646, 40, 1026)
-      const h = frameNumIn(safe.h, 400, 40, 700)
-      return {
-        id: id,
-        name: String(s.name == null ? '' : s.name).trim().slice(0, 24) || ('泡泡框' + (idx + 1)),
-        builtin: s.builtin === true,
-        pinned: Math.round(frameNumIn(s.pinned, 0, 0, 9999)),
-        createdAt: Math.round(frameNumIn(s.createdAt, Date.now(), 0, 1e15)),
-        textColor: frameColorOk(s.textColor, ''),
-        safe: { x: frameNumIn(safe.x, 190, 0, 1026 - w), y: frameNumIn(safe.y, 90, 0, 700 - h), w: w, h: h },
-        slots: { big: slot('big'), small1: slot('small1'), small2: slot('small2') },
-      }
-    }
-    // 整份框库净化：内置框强制只读（内容还原由前端做；宿主这里只保证"不许被改成非内置"）
-    function framesSanitize(list, defId) {
-      const arr = Array.isArray(list) ? list.slice(0, 50) : []
-      const out = []
-      for (let i = 0; i < arr.length; i++) {
-        const f = frameSanitizeOne(arr[i], i)
-        if (f.id === 'frame_classic') { f.builtin = true; f.name = '经典（内置）'; continue } // 内置框不进库（前端会补）
-        out.push(f)
-      }
-      let def = String(defId == null ? '' : defId).slice(0, 64)
-      if (!out.some((x) => x.id === def)) def = 'frame_classic'
-      return { frames: out, defaultFrameId: def }
-    }
-    // items 里的"框引用 / 外观覆盖"：只保留已知形状的字段（逐字段白名单）
-    function itemsSanitizeFrames(items) {
-      const list = Array.isArray(items) ? items : []
-      const cleanOne = (obj) => {
-        if (!obj || typeof obj !== 'object') return obj
-        const out = obj
-        if (typeof out.frameId === 'string') out.frameId = out.frameId.slice(0, 64)
-        else delete out.frameId
-        const ov = out.frameOverride
-        if (ov && typeof ov === 'object') {
-          const keep = {}
-          for (const slot of ['big', 'small1', 'small2']) {
-            const raw = ov[slot]
-            if (!raw || typeof raw !== 'object') continue
-            const p = {}
-            for (const k of ['bgOn', 'bg', 'bgAlpha', 'lineOn', 'line', 'lineW', 'lineAlpha', 'dashOn', 'dash', 'cap', 'join']) {
-              if (Object.prototype.hasOwnProperty.call(raw, k)) p[k] = raw[k]
-            }
-            // 颜色/数值仍然过一遍校验，避免脏值写进配置
-            const norm = frameSanitizeOne({ slots: { [slot]: { paint: p } } }, 0).slots[slot].paint
-            const only = {}
-            for (const k of Object.keys(p)) if (Object.prototype.hasOwnProperty.call(norm, k)) only[k] = norm[k]
-            keep[slot] = only
-          }
-          if (Object.keys(keep).length) out.frameOverride = keep
-          else delete out.frameOverride
-        } else delete out.frameOverride
-        return out
-      }
-      for (const it of list) {
-        if (!it || typeof it !== 'object') continue
-        cleanOne(it)
-        if (it.kind === 'choice' && Array.isArray(it.options)) for (const o of it.options) { if (o) { cleanOne(o); if (o.item) cleanOne(o.item) } }
-      }
-      return list
-    }
+    // 泡泡框净化实现已搬到 whale-assets-routes.mjs。
     function writeBubbleConfig(cfg) {
       const body = JSON.stringify(cfg, null, 2)
       for (const p of BUBBLE_FILE_CANDIDATES) {
@@ -5752,180 +4185,38 @@ export default {
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/bubble.json',
-      handler: async (req, res) => {
-        try {
-          if (req.method === 'POST' || req.method === 'PUT') {
-            const body = await readBodyMax(req, 512 * 1024)
-            const parsed = JSON.parse(body)
-            if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.items) || !Array.isArray(parsed.lib)) {
-              res.writeHead(400, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: false, error: 'invalid bubble config' }))
-              return
-            }
-            // v727：tapAdvance =「点按角色推进泡泡队列」（只存布尔值，不放行其它字段）
-            // v815：泡泡框（frames/defaultFrameId）与 items 上的框引用/外观覆盖走净化后落盘。
-            //   没带 frames 的老客户端 ⇒ 不写这两个键（老配置零 churn）。
-            const itemsClean = itemsSanitizeFrames(parsed.items)
-            const cfg = { v: 1, items: itemsClean, lib: parsed.lib, tapAdvance: parsed.tapAdvance === true }
-            if (Array.isArray(parsed.frames)) {
-              const fr = framesSanitize(parsed.frames, parsed.defaultFrameId)
-              cfg.frames = fr.frames
-              cfg.defaultFrameId = fr.defaultFrameId
-            }
-            writeBubbleConfig(cfg)
-            res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: true, config: cfg, ignored: bubbleConfigIgnored }))
-            return
-          }
-          const cfg = loadBubbleConfig()
-          res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: true, config: cfg }))
-        } catch (err) {
-          res.writeHead(400, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err).slice(0, 200) }))
-        }
-      },
+      handler: bubbleHandler,
     }))
 
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/bubble-imgs.json',
-      handler: (req, res) => {
-        res.writeHead(200, JSON_HEADERS)
-        res.end(JSON.stringify(bubbleImgPayload()))
-      },
+      handler: bubbleImgsHandler,
     }))
 
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/bubble-img-upload.json',
-      handler: async (req, res) => {
-        try {
-          // v882：写接口补方法校验（前端固定 POST；非写方法一律 405，与其它写接口一致）
-          if (req.method !== 'POST' && req.method !== 'PUT') {
-            res.writeHead(405, { ...JSON_HEADERS, Allow: 'POST, PUT' })
-            res.end(JSON.stringify({ ok: false, error: '不支持的请求方法' }))
-            return
-          }
-          const body = await readBodyMax(req, 10 * 1024 * 1024)
-          const parsed = JSON.parse(body)
-          const action = parsed && parsed.action
-          const index = readBubbleImgIndex()
-          if (action === 'upload') {
-            const name = String(parsed.name || '').trim().slice(0, 40) || ''
-            const data = String(parsed.data || '')
-            const m = /^data:image\/(png|gif);base64,([A-Za-z0-9+/=]+)$/.exec(data)
-            if (!m) {
-              res.writeHead(400, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: false, error: 'invalid image data' }))
-              return
-            }
-            const format = m[1] === 'gif' ? 'gif' : 'png'
-            const buf = Buffer.from(m[2], 'base64')
-            if (buf.length < 64 || buf.length > 8 * 1024 * 1024) {
-              res.writeHead(400, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: false, error: 'image too large' }))
-              return
-            }
-            const id = 'bimg_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)
-            fs.writeFileSync(path.join(pickBubbleImgDir(), id + '.' + format), buf)
-            index.images.push({ id, name, format, createdAt: Date.now() })
-            writeBubbleImgIndex(index)
-            res.writeHead(200, JSON_HEADERS)
-            res.end(JSON.stringify(bubbleImgPayload()))
-            return
-          }
-          if (action === 'delete') {
-            const id = String(parsed.id || '')
-            const img = index.images.find((x) => x.id === id)
-            if (!img) {
-              res.writeHead(404, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: false, error: 'image not found' }))
-              return
-            }
-            index.images = index.images.filter((x) => x.id !== id)
-            writeBubbleImgIndex(index)
-            const p = bubbleImgFilePath(id, img.format)
-            if (p) { try { fs.unlinkSync(p) } catch (err) {} }
-            res.writeHead(200, JSON_HEADERS)
-            res.end(JSON.stringify(bubbleImgPayload()))
-            return
-          }
-          res.writeHead(400, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, error: 'unknown action' }))
-        } catch (err) {
-          res.writeHead(400, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err).slice(0, 200) }))
-        }
-      },
+      handler: bubbleImgUploadHandler,
     }))
 
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/bubble-img.png',
-      handler: (req, res) => {
-        try {
-          const id = bubbleImgIdFromUrl(req.url)
-          // 1) 用户图库优先
-          const index = readBubbleImgIndex()
-          const img = index.images.find((x) => x.id === id)
-          if (img) {
-            const p = bubbleImgFilePath(id, img.format)
-            if (!p) throw new Error('bad image id')
-            const bytes = fs.readFileSync(p)
-            res.writeHead(200, {
-              'Content-Type': img.format === 'gif' ? 'image/gif' : 'image/png',
-              'Cache-Control': 'no-store',
-              'Content-Length': String(bytes.length),
-            })
-            res.end(bytes)
-            return
-          }
-          // 2) 内置默认图回退(全新安装无用户图库时,泡泡序列引用的语义 id 也能出图)
-          const def = DEFAULT_BUBBLE_IMGS.find((x) => x.id === id)
-          if (def) {
-            const bytes = loadBuiltinBubbleImgBytes(def)
-            if (bytes) {
-              res.writeHead(200, {
-                'Content-Type': def.format === 'gif' ? 'image/gif' : 'image/png',
-                'Cache-Control': 'no-store',
-                'Content-Length': String(bytes.length),
-              })
-              res.end(bytes)
-              return
-            }
-          }
-          throw new Error('bad image id')
-        } catch (err) {
-          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
-          res.end('bubble image unavailable')
-        }
-      },
+      handler: bubbleImgHandler,
     }))
 
-          disposers.push(registerRoute({
+    disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/widget.js',
-      handler: (req, res) => {
-        res.writeHead(200, {
-          'Content-Type': 'application/javascript; charset=utf-8',
-          'Cache-Control': 'no-store',
-        })
-        res.end(loadWidgetJs())
-      },
+      handler: widgetJsHandler,
     }))
 
     // v881：桌面控制台页面（设计稿原样承载，iframe 加载）
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/console.html',
-      handler: (req, res) => {
-        res.writeHead(200, {
-          'Content-Type': 'text/html; charset=utf-8',
-          'Cache-Control': 'no-store',
-        })
-        res.end(loadConsoleHtml())
-      },
+      handler: consoleHtmlHandler,
     }))
 
     // tapIndex 是 web 形态的注入通道；桌面端走上面的 index-inject 行。
