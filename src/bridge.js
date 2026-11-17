@@ -127,6 +127,7 @@ import { createProtocolRoutes } from './qq/features/protocol-routes.js';
 import { createSocialLegacyRoutes } from './qq/features/social-legacy.js';
 import { createConsoleAdminRoutes } from './qq/features/console-admin.js';
 import { createV2AdminRoutes } from './qq/features/v2-admin.js';
+import { createSocialV2Store } from './qq/features/social-v2-store.js';
 import { escapeCqText, unquoteJsonString, withTimeout, sanitizeMediaSummary } from './qq/text.js';
 import { createLock } from './qq/lock.js';
 import { createRoles } from './qq/roles.js';
@@ -4494,247 +4495,37 @@ async function main(options = {}) {
     return st;
   }
 
+  // ── 二代状态存储（加载 / 快照 / 合并写 / 立即写）──────────────────────────
+  // 为什么外置：读写细节与「什么时候存」是两件事。bridge 只留一个 store 句柄；
+  // 文件读写、快照裁剪、300ms 合并窗口、跨进程回写保护都在
+  // qq/features/social-v2-store.js 里，语义与拆分前逐行一致。
+  const socialV2Store = createSocialV2Store({
+    fs, crypto, SOCIAL_V2_FILE, readJsonSafe, atomicWriteJson, createCoalescingWriter,
+    log, getConfig: () => cfg, socialV2, seenForwardIds,
+    defaultWakeConfigV2, pickWakeTriggersV2, normalizeSpeakerIdsV2, refreshDefaultWakeConfigV2,
+    normalizeClosureRecord, sanitizeForwardId, rememberAgentToken,
+    ensureWakeableV2, scheduleProactiveCheckV2,
+  });
+
+  // 仍用函数声明：这些函数在 main() 更早的代码里被当作引用/惰性调用传出去，
+  // 保持提升语义，避免执行顺序变化踩 TDZ。
   function loadSocialV2State() {
-    try {
-      // 记下读取时刻的文件指纹。加载末尾会统一落盘一次（为了让 ensureWakeableV2
-      // 中途的改动不丢），但如果这期间**别的进程**已经写过这个文件，我们手上的
-      // 内存态就是旧的 —— 再写回去等于把它那份更新的状态覆盖掉。
-      // 这不是假想：日志里出现过两个桥接实例同时启动，第二个实例在加载后立刻回写，
-      // 把第一个实例刚更新的读水位/唤醒时间/转发 id 全部退回旧值。
-      const fileStamp = (() => {
-        try {
-          const s = fs.statSync(SOCIAL_V2_FILE);
-          return `${s.size}:${s.mtimeMs}`;
-        } catch {
-          return null;
-        }
-      })();
-      const raw = readJsonSafe(SOCIAL_V2_FILE, null);
-      socialV2.paused = raw?.paused === true;
-      if (raw && typeof raw.conversations === 'object') {
-        const seenTokens = new Set();
-        for (const [key, val] of Object.entries(raw.conversations)) {
-          if (!val || typeof val !== 'object') continue;
-          if (!/^(group|private):\d+$/.test(key)) continue;
-          const defaultWc = defaultWakeConfigV2();
-          let agentToken = String(val.agentToken || crypto.randomBytes(16).toString('hex'));
-          if (!agentToken || seenTokens.has(agentToken)) {
-            agentToken = crypto.randomBytes(16).toString('hex');
-          }
-          seenTokens.add(agentToken);
-          const st = {
-            wakeConfig: {
-              ...defaultWc,
-              ...(val.wakeConfig ?? {}),
-              // 加载时也按已知字段过滤：旧状态文件里可能残留任意键（见 WAKE_TRIGGER_KEYS）。
-              triggers: pickWakeTriggersV2((val.wakeConfig?.triggers) ?? {}, defaultWc.triggers)
-            },
-            recentMessages: Array.isArray(val.recentMessages) ? val.recentMessages : [],
-            unread: Array.isArray(val.unread) ? val.unread : [],
-            lastWakeReason: String(val.lastWakeReason ?? ''),
-            lastAiReplyAt: Number(val.lastAiReplyAt) || 0,
-            lastActionAt: Number(val.lastActionAt) || 0,
-            agentToken,
-            bootstrapSent: !!val.bootstrapSent,
-            wakeTimes: Array.isArray(val.wakeTimes) ? val.wakeTimes : [],
-            sendTimes: Array.isArray(val.sendTimes) ? val.sendTimes : [],
-            stickerCollectTimes: Array.isArray(val.stickerCollectTimes) ? val.stickerCollectTimes : [],
-            pendingWakeTimer: null,
-            sleepTimer: null,
-            replyCheckTimer: null,
-            proactiveTimer: null,
-            lastIncomingAt: Number(val.lastIncomingAt) || 0,
-            // 上线补历史的水位：上次补历史见到的最新远端时间 + 上次检查时间。
-            // 旧状态文件没有这两个字段时回落到 0，第一次上线会按 maxAgeMinutes 窗口补。
-            lastHistoryMessageTime: Number(val.lastHistoryMessageTime) || 0,
-            lastHistoryCheckedAt: Number(val.lastHistoryCheckedAt) || 0,
-            lastHistoryCatchup: (val.lastHistoryCatchup && typeof val.lastHistoryCatchup === 'object')
-              ? val.lastHistoryCatchup : null,
-            preSleepWaitSatisfiedAt: Number(val.preSleepWaitSatisfiedAt) || 0,
-            preSleepWaitObservedAt: Number(val.preSleepWaitObservedAt) || 0,
-            preSleepWaitAccumMs: Number(val.preSleepWaitAccumMs) || 0,
-            lastUnreadSeq: Number(val.lastUnreadSeq) || 0,
-            lastReadThroughSeq: Number.isSafeInteger(val.lastReadThroughSeq) && val.lastReadThroughSeq >= 0
-              ? Math.min(val.lastReadThroughSeq, Number(val.lastUnreadSeq) || 0) : 0,
-            modelSeenSeqs: new Set(),
-            activeTopics: Array.isArray(val.activeTopics) ? val.activeTopics : [],
-            pendingThoughts: Array.isArray(val.pendingThoughts) ? val.pendingThoughts : [],
-            memberImpressions: (() => {
-              const rawImp = (val.memberImpressions && typeof val.memberImpressions === 'object') ? val.memberImpressions : {};
-              const clean = {};
-              for (const [k, v] of Object.entries(rawImp)) {
-                if (['__proto__', 'constructor', 'prototype'].includes(k)) continue;
-                clean[k] = v;
-              }
-              return clean;
-            })(),
-            // 上次自然收尾：跨重启保留，才是「结束是下次更好的开始」。
-            // 旧状态文件没有这个字段 → null，不影响唤醒。
-            closure: normalizeClosureRecord(val.closure, cfg.socialV2?.closure),
-            // 鱼群保护的冷却/直呼放行/触发记录要跨桥接重启保留，
-            // 否则每次重启都失忆（2026-10-23 补；也供设置页读取）。
-            fishGuard: (val.fishGuard && typeof val.fishGuard === 'object') ? val.fishGuard : undefined,
-            fishGuardBypass: (val.fishGuardBypass && typeof val.fishGuardBypass === 'object') ? val.fishGuardBypass : undefined,
-            lastFishGuard: (val.lastFishGuard && typeof val.lastFishGuard === 'object') ? val.lastFishGuard : undefined,
-            fishGuardLog: (Array.isArray(val.fishGuardLog) ? val.fishGuardLog : [])
-              .filter((x) => x && typeof x === 'object')
-              .slice(-30)
-          };
-          // 拉黑之后，他**拉黑前**堆在未读/最近上下文里的消息也不能再喂给模型 ——
-          // 否则下一次唤醒（哪怕是被别人触发的）会把它们当成新消息来回应，
-          // 看起来就像「黑名单没生效」。只清入站缓存，不动记忆卡里已沉淀的内容。
-          {
-            const blocked = new Set((cfg.deny?.users ?? []).map(String));
-            if (blocked.size) {
-              const before = st.unread.length + st.recentMessages.length;
-              st.unread = st.unread.filter((m) => !blocked.has(String(m?.userId ?? '')));
-              st.recentMessages = st.recentMessages.filter((m) => !blocked.has(String(m?.userId ?? '')));
-              const removed = before - st.unread.length - st.recentMessages.length;
-              if (removed > 0) {
-                log(`[黑名单] ${key} 启动时清掉 ${removed} 条来自 deny.users 的未读/上下文（积压不再喂给模型）`);
-              }
-            }
-          }
-          // 旧状态/异常状态里的指定成员名单也统一归一化，防止“null”/非法值污染。
-          if (st.wakeConfig?.triggers && typeof st.wakeConfig.triggers === 'object') {
-            st.wakeConfig.triggers.speakerIds = normalizeSpeakerIdsV2(st.wakeConfig.triggers.speakerIds);
-            if (key.startsWith('private:')) st.wakeConfig.triggers.speakerIds = [];
-          }
-          // 仍使用默认唤醒配置的会话，在重启加载时同步到当前推荐/默认参数。
-          refreshDefaultWakeConfigV2(st);
-          rememberAgentToken(key, st.agentToken);
-          socialV2.conversations.set(key, st);
-          // 重启后从已持久化的消息与 seenForwardIds 字段重建“本会话见过的 forward id”
-          {
-            const rebuilt = new Set();
-            if (Array.isArray(val.seenForwardIds)) {
-              for (const fid of val.seenForwardIds) {
-                const safe = sanitizeForwardId(fid);
-                if (safe) rebuilt.add(safe);
-              }
-            }
-            for (const m of [...(st.recentMessages || []), ...(st.unread || [])]) {
-              if (Array.isArray(m?.forwardIds)) {
-                for (const fid of m.forwardIds) {
-                  const safe = sanitizeForwardId(fid);
-                  if (safe) rebuilt.add(safe);
-                }
-              }
-            }
-            if (rebuilt.size) seenForwardIds.set(key, rebuilt);
-          }
-          ensureWakeableV2(st, { skipSave: true, key });
-          scheduleProactiveCheckV2(key);
-        }
-        // 加载阶段统一落盘一次，避免 ensureWakeableV2 中途写盘覆盖未加载会话。
-        // 但只有在文件仍是「我们读到的那一份」时才写：否则说明有另一个进程写过它，
-        // 我们手里的内存态已经过时，回写会静默吞掉对方的新数据。
-        const nowStamp = (() => {
-          try {
-            const s = fs.statSync(SOCIAL_V2_FILE);
-            return `${s.size}:${s.mtimeMs}`;
-          } catch {
-            return null;
-          }
-        })();
-        if (fileStamp !== null && nowStamp !== null && fileStamp !== nowStamp) {
-          log('⚠️ state/social-v2.json 在本次加载期间被其它进程改写，跳过回写以免覆盖更新的状态（是否误开了第二个桥接实例？）');
-        } else {
-          flushSocialV2State();
-        }
-      }
-    } catch (error) {
-      log('读取 socialV2 状态失败:', error?.message ?? error);
-    }
-  }
-
-  // ── 二代状态落盘：合并写（save）与立即写（flush）分开 ──────────────────────
-  //
-  // 为什么拆：原先 `saveSocialV2State()` 是同步全量重写 state/social-v2.json，而它在
-  // 每条入站消息、每条出站消息、每次记忆更新后都会被调用。多会话实例单次写就有
-  // 几十~几百 KB，繁忙群等于「每条消息一次全文件同步写」压在 DSH 事件循环上
-  // （桥接与 QQ 事件是同一个循环），表现为控制台与回复一起抖动。
-  //
-  // 现在两条路径：
-  //   · flushSocialV2State() —— **立即**同步落盘（与旧行为完全一致）。以下语义点必须用它：
-  //       唤醒/潜水配置、睡前/收尾、会话切换/重置、写完立即读回、进程退出、内嵌 stop。
-  //   · saveSocialV2State()  —— **合并写**：300ms 窗口内多次调用只落盘一次。用于高频记账
-  //       （入站消息缓冲、发送计数、记忆上下文）。窗口是「首次脏标记后固定滞后」，
-  //       不随每次调用重置，所以持续有新消息也不会被无限推迟（最坏陈旧 ≈ 300ms + 一次写）。
-  // 退出保障：installProcessGuards 的 SIGINT/SIGTERM/exit/uncaughtException、控制台重启、
-  // 内嵌 stop() 都会显式 flush，所以合并窗口里的数据不会因正常退出而丢。
-  function buildSocialV2Snapshot() {
-    const obj = { paused: socialV2.paused, conversations: Object.create(null) };
-    for (const [key, st] of socialV2.conversations) {
-      obj.conversations[key] = {
-        wakeConfig: st.wakeConfig,
-        recentMessages: st.recentMessages.slice(-200),
-        unread: st.unread.slice(-100),
-        lastWakeReason: st.lastWakeReason,
-        lastAiReplyAt: st.lastAiReplyAt,
-        lastActionAt: st.lastActionAt,
-        agentToken: st.agentToken,
-        bootstrapSent: st.bootstrapSent,
-        wakeTimes: st.wakeTimes.slice(-200),
-        sendTimes: st.sendTimes.slice(-500),
-        stickerCollectTimes: Array.isArray(st.stickerCollectTimes) ? st.stickerCollectTimes.slice(-500) : [],
-        lastIncomingAt: st.lastIncomingAt || 0,
-        lastHistoryMessageTime: st.lastHistoryMessageTime || 0,
-        lastHistoryCheckedAt: st.lastHistoryCheckedAt || 0,
-        lastHistoryCatchup: st.lastHistoryCatchup && typeof st.lastHistoryCatchup === 'object' ? st.lastHistoryCatchup : null,
-        preSleepWaitSatisfiedAt: st.preSleepWaitSatisfiedAt || 0,
-        preSleepWaitObservedAt: st.preSleepWaitObservedAt || 0,
-        sendFailureStreak: st.sendFailureStreak || 0,
-        wakeSuspendedUntil: st.wakeSuspendedUntil || 0,
-        lastSendFailureAt: st.lastSendFailureAt || 0,
-        channelGateLoggedAt: st.channelGateLoggedAt || 0,
-        preSleepWaitAccumMs: st.preSleepWaitAccumMs || 0,
-        lastUnreadSeq: st.lastUnreadSeq || 0,
-        lastReadThroughSeq: st.lastReadThroughSeq || 0,
-        activeTopics: Array.isArray(st.activeTopics) ? st.activeTopics.slice(-50) : [],
-        pendingThoughts: Array.isArray(st.pendingThoughts) ? st.pendingThoughts.slice(-50) : [],
-        memberImpressions: st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {},
-        // 对话收尾记录：只存结论（收在哪 / 下次怎么接）+ 冷却时间，不存额外消息副本。
-        closure: st.closure && typeof st.closure === 'object' ? st.closure : undefined,
-        // 鱼群保护状态（2026-10-23）：冷却、直呼放行、最近触发记录。
-        fishGuard: st.fishGuard && typeof st.fishGuard === 'object' ? st.fishGuard : undefined,
-        fishGuardBypass: st.fishGuardBypass && typeof st.fishGuardBypass === 'object' ? st.fishGuardBypass : undefined,
-        lastFishGuard: st.lastFishGuard && typeof st.lastFishGuard === 'object' ? st.lastFishGuard : undefined,
-        fishGuardLog: Array.isArray(st.fishGuardLog) ? st.fishGuardLog.slice(-30) : [],
-        seenForwardIds: Array.from(seenForwardIds.get(key) || []).slice(-1000)
-      };
-    }
-    return obj;
-  }
-
-  // 惰性创建：saveSocialV2State/flushSocialV2State 都是函数声明（会被提升），
-  // 如果 main() 里更早的同步代码在 writer 初始化之前调用它们，直接用 const 会踩 TDZ
-  // 抛 ReferenceError。惰性化后「谁先调谁创建」，行为不变但消除了这个执行顺序地雷。
-  let socialV2Writer = null;
-  function socialV2WriterInstance() {
-    if (!socialV2Writer) {
-      socialV2Writer = createCoalescingWriter({
-        write: () => atomicWriteJson(SOCIAL_V2_FILE, buildSocialV2Snapshot()),
-        coalesceMs: 300,
-        log: (message, error) => log(`${message}:`, error?.message ?? error),
-      });
-    }
-    return socialV2Writer;
+    return socialV2Store.loadState();
   }
 
   /** 合并写：高频记账用，最终会落盘（崩溃最多丢一个合并窗口）。 */
   function saveSocialV2State() {
-    socialV2WriterInstance().schedule();
+    return socialV2Store.save();
   }
 
   /** 立即写：崩溃恢复/收尾/配置变更/会话重置/写后读回/进程退出必须走这条。 */
   function flushSocialV2State() {
-    return socialV2WriterInstance().flush();
+    return socialV2Store.flush();
   }
 
   /** 丢弃待写的合并任务（调用方即将直写 SOCIAL_V2_FILE 时必须先调它）。 */
   function cancelSocialV2PendingSave() {
-    return socialV2WriterInstance().cancel();
+    return socialV2Store.cancel();
   }
 
   // 供模块级退出钩子与内嵌 stop() 使用（它们在 main() 作用域外）。
