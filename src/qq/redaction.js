@@ -56,14 +56,6 @@ function forgetAgentToken(key) {
   CONVERSATION_TOKENS.delete(key);
 }
 
-// 读取 DSH 模型能力的在途 Promise：withTimeout 只做 Promise.race，不会取消底层 RPC，
-// 因此并发刷新会各自留下一个不可取消的请求。这里做去重，同一时刻只发一个。
-let modelCatalogInFlight = null;
-// DSH 思考强度（reasoningEffort）热切换代号。
-// 控制台改强度后递增它，让已在运行的会话在下一条消息重新 selectModel；
-// 放在模块级是为了不依赖 main() 内部声明的执行顺序（避免 TDZ）。
-let modelSelectionEpoch = 0;
-
 // 敏感文本脱敏：把 SENSITIVE_RE 命中的片段替换为 ***，供日志/反馈/活动记录写入前使用。
 // SENSITIVE_RE 未带 g 标志，这里动态补 g 以替换所有命中片段。
 function redactSensitiveText(text) {
