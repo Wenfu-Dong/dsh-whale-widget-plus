@@ -176,6 +176,10 @@ export async function startFakeDsh({ mode = 'chat', replyText = '我在。', pre
   const pendingTurns = new Map(); // sessionId -> number（未推送的回合数）
   const state = { created: Math.floor(Math.random() * 1e6) };
   let signCookie = 'dsh-auth-test=v1.test-signature';
+  // 模式是「可写」的：控制台切模式会调 settings/update 写穿，而桥接每 5 秒
+  // 用 settings/describe 以 DSH 的值覆盖本地模式。若这里不回写，切模式后
+  // 5 秒内就会被假宿主「改回去」，模式切换类用例会变成随机结果。
+  let modeValue = mode;
 
   const rpcValue = (method, payload) => {
     switch (method) {
@@ -183,9 +187,12 @@ export async function startFakeDsh({ mode = 'chat', replyText = '我在。', pre
         return {
           namespaces: [
             { ns: 'agent-presets', value: { default: presets[0] ?? 'qq-chat' } },
-            { ns: 'qq-mode', value: { mode } },
+            { ns: 'qq-mode', value: { mode: modeValue } },
           ],
         };
+      case 'settings/update':
+        if (payload?.ns === 'qq-mode' && payload?.patch?.mode) modeValue = String(payload.patch.mode);
+        return {};
       case 'agentPresets/list':
         return { presets: presets.map((id) => ({ id, isDefault: id === presets[0] })) };
       case 'session/modelCatalog':

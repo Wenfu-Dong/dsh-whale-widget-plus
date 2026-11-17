@@ -47,15 +47,25 @@ export async function looksLikeDsh(port, timeoutMs = 1500) {
   return probeDshBaseUrl(`http://127.0.0.1:${port}`, timeoutMs);
 }
 
-/** 枚举本机正在监听的 DSH，返回 `http://127.0.0.1:<port>`；找不到返回 null。 */
-export async function discoverDshBaseUrl() {
-  if (process.platform !== 'win32') return null;
+/**
+ * 本机上「由 DSH 进程监听的回环端口」清单（按端口去重，不做 HTTP 探活）。
+ *
+ * 为什么要单独导出：一个 DSH 进程会同时开多个回环端口（Web UI、模型网关、
+ * 插件控制台……），只取第一个探活成功的有可能拿到网关而不是 API。调用方
+ * （如 scripts/verify-real-dsh.mjs）需要拿到全部候选再逐个用真实 RPC 确认。
+ */
+export function listDshCandidatePorts() {
+  if (process.platform !== 'win32') return [];
   const names = processNames();
-  const candidates = listeningLoopbackPorts()
+  return listeningLoopbackPorts()
     .filter(({ pid }) => /harness|dsh/i.test(names.get(pid) ?? ''))
     .map(({ port }) => port)
     .filter((port, i, all) => all.indexOf(port) === i);
-  for (const port of candidates) {
+}
+
+/** 枚举本机正在监听的 DSH，返回 `http://127.0.0.1:<port>`；找不到返回 null。 */
+export async function discoverDshBaseUrl() {
+  for (const port of listDshCandidatePorts()) {
     if (await looksLikeDsh(port)) return `http://127.0.0.1:${port}`;
   }
   return null;
