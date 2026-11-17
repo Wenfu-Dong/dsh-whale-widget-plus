@@ -30,11 +30,16 @@ const notes = [];
 
 const HOST_PROVIDED_ALLOW = new Set([
   // 运行时由宿主环境提供、插件**不再自带**的包。这些名字绝不允许出现在
-  // dependencies 里（见下面的宿主遮蔽扫描）；代码里 import 它们是合法的：
+  // dependencies 里（见下面的宿主遮蔽扫描）；代码里 import 它们是合法的
+  // （import 处必须自带降级：找不到时走宿主解析或优雅报错，不得在模块加载期抛）：
   //   · @deepseek-ai/schemastery：宿主 node_modules 自带（backend/lib/qq-mode.js 运行时解析）；
+  //   · playwright-core：宿主自带，desktop 1.63-alpha / web 1.64-alpha，与插件曾钉的
+  //     ^1.65 互不满足——声明即版本冲突遮蔽（src/voice-doubao-web.js、
+  //     backend/vendor/douyin/playwright-runtime.mjs 运行时解析）；
   //   · react：设置页 bundle（lib/client.js）跑在 DSH 的 React 网页应用里，
   //     由宿主的浏览器模块图提供。
   '@deepseek-ai/schemastery',
+  'playwright-core',
   'react',
 ]);
 
@@ -193,16 +198,46 @@ section('4. 包内 import 可解析性');
 }
 
 // ── 5. 宿主遮蔽扫描（昨天 DSH 整体起不来的根因类）────────────────────────────
+// 扫**完整安装树**而不是只扫直接依赖：插件依赖的包自己又依赖了宿主同款包时，
+// 同样会被提升进 profile 顶层 node_modules 遮蔽宿主（npm 扁平安装把传递依赖
+// 都放在顶层 node_modules，扫一层就是全量）。
+// 危险名单 = 本机 DSH profile 顶层 node_modules 观察到的宿主自带包
+// （2026-11-17 观察；宿主升级新增自带包时同步补这里）。
 section('5. 宿主遮蔽扫描');
+const HOST_BUNDLED_SCOPES = [
+  '@deepseek-ai', '@dsh-ops', '@electron', '@electron-internal', '@anthropic-ai',
+  '@babel', '@openai', '@opentelemetry', '@playwright', '@stablelib', '@standard-schema',
+];
+const HOST_BUNDLED_NAMES = ['electron', 'playwright', 'playwright-core', 'cosmokit', 'schemastery'];
 {
   const bad = Object.keys(pkg.dependencies ?? {}).filter((name) => /^@deepseek-ai\//.test(name));
   if (bad.length) {
-    fail(`dependencies 里声明了宿主自带作用域的包：${bad.join('、')} —— 安装时会被提升进 profile 顶层 node_modules 遮蔽宿主副本（安装顺序决定谁生效），请改为运行时从宿主解析（参照 backend/lib/qq-mode.js）或移除`);
-  } else {
-    ok('dependencies 无 @deepseek-ai/*（不会遮蔽宿主核心包）');
+    fail(`dependencies 里声明了宿主自带作用域的包：${bad.join('、')} —— 安装时会被提升进 profile 顶层 node_modules 遮蔽宿主副本（安装顺序决定谁生效），请改为运行时从宿主解析（参照 src/host-module.mjs）或移除`);
   }
   for (const name of Object.keys(pkg.dependencies ?? {})) {
     if (HOST_PROVIDED_ALLOW.has(name)) fail(`「${name}」在宿主兜底清单里却出现在 dependencies —— 会形成第二份副本`);
+  }
+  // 完整安装树（npm 扁平安装：顶层 node_modules 即全部已装包，含传递依赖）。
+  const nmDir = path.join(installDir, 'node_modules');
+  const shadowed = [];
+  try {
+    for (const entry of fs.readdirSync(nmDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      if (entry.name.startsWith('@')) {
+        if (HOST_BUNDLED_SCOPES.includes(entry.name)) {
+          for (const sub of fs.readdirSync(path.join(nmDir, entry.name))) {
+            shadowed.push(`${entry.name}/${sub}`);
+          }
+        }
+        continue;
+      }
+      if (HOST_BUNDLED_NAMES.includes(entry.name)) shadowed.push(entry.name);
+    }
+  } catch { void 0; }
+  if (shadowed.length) {
+    fail(`安装树里出现了宿主自带的包（含传递依赖）：${shadowed.join('、')} —— 装进 profile 后会遮蔽宿主副本，可能导致 DSH 整体启动失败；请移除引入它的依赖或改为运行时从宿主解析`);
+  } else {
+    ok('完整安装树无宿主同款包（直接依赖与传递依赖都不遮蔽宿主）');
   }
 }
 

@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { hostModuleCandidates } from '../../src/host-module.mjs';
 
 // ⚠️ 工程坑（两段）：
 //   ① 发布的 @deepseek-ai/schemastery 只有 lib/index.cjs，但 package.json 的 import
@@ -26,51 +27,40 @@ import { createRequire } from 'node:module';
 //      「插件副本 vs 宿主副本谁生效」取决于安装顺序，宿主哪天升版本就是又一个
 //      「装上插件 DSH 整体启动失败」（2026-11-16 的真事故就是这个机制：插件带进来的
 //      旧 @deepseek-ai/dsh-* 盖掉了宿主 0.2.x）。所以 package.json 已不再声明它，
-//      这里按「宿主 profile 优先、插件旧副本兜底」解析；两边都没有才报错。
+//      解析走 src/host-module.mjs（插件旧副本 → 宿主 profile → DSH 运行时）。
+//   ③ **导入期绝不抛错**：这一行是 cordis.patch.yml 的 loader entry，模块评估抛错
+//      会让整条加载失败。找不到 schemastery 时 Config 导出 null（命名空间缺席 =
+//      模式切换退回 config.json，DSH 本体照常跑），并把原因打到 stderr 排障。
 const require = createRequire(import.meta.url);
 
-function loadSchemasteryFrom(dir) {
-  const pkgFile = path.join(dir, 'package.json');
-  const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
-  const main = String(pkg.main || '').trim();
-  if (main) return require(path.join(dir, main));
-  return require(dir);
-}
-
 function loadSchemastery() {
-  const candidates = [];
-  // ① 插件自己的副本：开发机/老 clone 的 node_modules 里可能还留着（向后兼容）。
-  try { candidates.push(require.resolve('@deepseek-ai/schemastery')); } catch { /* 新依赖策略下常态 */ }
-  // ② 宿主 profile：DSH 跑起来必然带着 schemastery（它是宿主设置服务的 schema 库）。
-  //    web 与 desktop 两种 profile 都扫；DSH_HOME 允许自定义。
-  for (const root of [process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), path.join(os.homedir(), '.dsh-web')]) {
-    const profilesDir = path.join(root, 'profiles');
-    let names = [];
-    try { names = fs.readdirSync(profilesDir); } catch { continue; }
-    for (const name of names) {
-      candidates.push(path.join(profilesDir, name, 'node_modules', '@deepseek-ai', 'schemastery'));
-    }
-    candidates.push(path.join(root, 'node_modules', '@deepseek-ai', 'schemastery'));
-  }
-  for (const candidate of candidates) {
+  // ① 插件自己的副本：开发机 / 老 clone 的 node_modules 里可能还留着（向后兼容）。
+  try { return require('@deepseek-ai/schemastery'); } catch { /* 新依赖策略下常态 */ }
+  // ② 宿主候选（profiles/*/node_modules、DSH 根、.dsh-web、dsh-runtimes）。
+  for (const dir of hostModuleCandidates('@deepseek-ai/schemastery')) {
     try {
-      if (candidate.endsWith('.js') || candidate.endsWith('.cjs')) return require(candidate);
-      if (fs.existsSync(path.join(candidate, 'package.json'))) return loadSchemasteryFrom(candidate);
+      const pkgFile = path.join(dir, 'package.json');
+      if (!fs.existsSync(pkgFile)) continue;
+      const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
+      const main = String(pkg.main || '').trim();
+      if (main) return require(path.join(dir, main));
+      return require(dir);
     } catch { /* 下一个候选 */ }
   }
-  throw new Error(
-    '找不到 @deepseek-ai/schemastery（宿主自带的 schema 库，插件按 2026-11 依赖策略不再自带）：'
-    + '请确认 DSH 已安装并至少完整打开过一次（<DSH_HOME>/profiles/*/node_modules/@deepseek-ai/schemastery 应存在），'
-    + '然后重启 DSH。',
-  );
+  return null;
 }
 
 const z = loadSchemastery();
+if (!z) {
+  console.error('[qq-mode] 找不到 @deepseek-ai/schemastery（宿主自带的 schema 库，插件不再自带）：'
+    + 'qq-mode 命名空间本次不注册，模式切换退回 config.json。请确认 DSH 已完整安装并至少打开过一次'
+    + '（<DSH_HOME>/profiles/*/node_modules/@deepseek-ai/schemastery 应存在），然后重启 DSH。');
+}
 
 export const name = 'surfcore/qq-mode';
 export const inject = ['settings'];
 
-export const Config = z.object({
+export const Config = z ? z.object({
   mode: z.union([
     z.const('chat'),
     z.const('closed-agent'),
@@ -79,7 +69,7 @@ export const Config = z.object({
     z.const('simulation'),
   ]).default('reserved2').extra('volatile', true),
   ownerQQ: z.string().description('管理员 QQ（ownerQQ）；留空表示不通过 DSH 设置覆盖 config.json').extra('volatile', true),
-});
+}) : null;
 
 /** 0.2.x 下命名空间由 entry id + Config 推导，apply 不需要注册任何东西。 */
 export function apply() {}

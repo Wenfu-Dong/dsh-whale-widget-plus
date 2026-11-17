@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { chromium } from './playwright-runtime.mjs';
+import { chromium, chromiumUnavailableReason } from './playwright-runtime.mjs';
 
 const execute = promisify(execFile);
 const versionOf = value => /^\d+\.\d+\.\d+\.\d+$/.exec(String(value || '').trim())?.[0] || null;
@@ -122,6 +122,11 @@ export async function runBrowserHost({ profile, controlDir, port, chromiumImpl =
   try {
     writeState(false);
     try { installation = await probeInstallation(); } catch {}
+    if (!chromiumImpl) {
+      // 引擎缺失（playwright-runtime 的降级导出）：把可执行指引写进 browser.json
+      // 与日志，父进程读到的是「为什么没起来」而不是裸 TypeError。
+      throw new Error(chromiumUnavailableReason());
+    }
     context = await chromiumImpl.launchPersistentContext(profile, {
       channel: 'msedge', headless: false, viewport: null, ignoreDefaultArgs: ['--mute-audio'],
       args: [`--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1', '--autoplay-policy=no-user-gesture-required'],

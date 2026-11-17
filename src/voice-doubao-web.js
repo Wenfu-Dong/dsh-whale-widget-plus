@@ -28,6 +28,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pruneAudioCache, resolveFfmpeg } from './voice-core.js';
+import { resolveHostModule } from './host-module.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -55,14 +56,19 @@ export function defaultProfileDir() {
 }
 
 function loadChromium() {
-  let mod;
+  // 插件不再自带 playwright-core（dependencies 已移除——它是 DSH 宿主自带的包，
+  // 插件声明一份会在安装时遮蔽宿主浏览器栈，「装上插件 DSH 整体启动失败」同机制）。
+  // 改为：插件旧副本（开发机残留）→ 宿主 profile → DSH 运行时；都没有才报错。
   try {
-    mod = require('playwright-core');
-  } catch (error) {
-    throw new Error(`豆包网页音源缺少 playwright-core：${error?.message ?? error}`);
+    const mod = require('playwright-core');
+    if (mod?.chromium) return mod.chromium;
+  } catch { /* 新依赖策略下的常态 */ }
+  const host = resolveHostModule('playwright-core') ?? resolveHostModule('playwright');
+  if (!host?.chromium) {
+    throw new Error('豆包网页音源缺浏览器引擎：playwright-core 没找到（插件不再自带，改用 DSH 宿主副本）。'
+      + '确认 DSH 已完整安装并至少打开过一次（profiles/*/node_modules 里应有 playwright-core），然后完全重启 DSH 再试。');
   }
-  if (!mod?.chromium) throw new Error('豆包网页音源缺少 playwright-core 的 chromium');
-  return mod.chromium;
+  return host.chromium;
 }
 
 /** 极简 protobuf 解析：只取我们需要的字段（4=事件名，8=音频块），够用且不引依赖。 */

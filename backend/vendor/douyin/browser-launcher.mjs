@@ -1,5 +1,5 @@
 import { findSharedPage } from './browser-pages.mjs';
-import { chromium } from './playwright-runtime.mjs';
+import { chromium, chromiumUnavailableReason } from './playwright-runtime.mjs';
 import { randomUUID } from 'node:crypto';
 
 export const PREPARE_PAGE_NAME = 'deepseek-douyin-launcher';
@@ -22,10 +22,16 @@ function abortable(pending, signal, lateResult) {
 }
 
 // 连接仍只指向已核对归属的专用 CDP；取消时仅断开新建连接，不关闭 Edge 进程。
-export async function connectDedicatedBrowser(endpoint, { signal, connect = (url, options) => chromium.connectOverCDP(url, options) } = {}) {
+// chromium 可能为 null（引擎缺失时的降级导出，见 playwright-runtime.mjs）：在
+// 使用点给出可执行指引，不让裸 TypeError 冒出去。
+export async function connectDedicatedBrowser(endpoint, { signal, connect } = {}) {
   cancelled(signal);
+  const useConnect = connect ?? ((url, options) => {
+    if (!chromium) throw new Error(chromiumUnavailableReason());
+    return chromium.connectOverCDP(url, options);
+  });
   try {
-    return await abortable(connect(endpoint, { timeout: CONNECT_TIMEOUT, noDefaults: true }), signal, browser => browser.close().catch(() => {}));
+    return await abortable(useConnect(endpoint, { timeout: CONNECT_TIMEOUT, noDefaults: true }), signal, browser => browser.close().catch(() => {}));
   } catch (error) {
     cancelled(signal);
     throw new Error(error?.name === 'TimeoutError'
