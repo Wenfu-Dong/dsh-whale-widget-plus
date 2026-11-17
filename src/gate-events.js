@@ -151,6 +151,47 @@ export function createGateEventStore({ dir, log = () => {}, maxBytes = 2 * 1024 
     }
   }
 
+  /**
+   * 原地刷新一条已落盘的未确认记录：只更新「事实字段」（时间/级别/原因/影响/建议/
+   * 证据/repeatCount），保留 id 与 ack 状态——确认过的记录不会被复活，前端拿到的
+   * 始终是同一条故障的最新描述。
+   */
+  function refreshPersistedRow(existing, stored) {
+    const repeatCount = (Number(existing.repeatCount) || 1) + 1;
+    const next = {
+      ...existing,
+      at: stored.at,
+      level: stored.level,
+      reason: stored.reason,
+      impact: stored.impact,
+      recommendation: stored.recommendation,
+      evidence: stored.evidence,
+      repeatCount,
+    };
+    try {
+      const raw = fs.readFileSync(file, 'utf8');
+      const lines = raw.split(/\r?\n/);
+      let replaced = false;
+      const out = lines.map((line) => {
+        if (replaced || !line) return line;
+        try {
+          const row = JSON.parse(line);
+          if (row?.id !== existing.id) return line;
+          replaced = true;
+          return JSON.stringify(next);
+        } catch { return line; }
+      });
+      if (!replaced) return; // 行已被轮转掉：让本次调用当作新记录走（下层不会再扫到它）
+      const tmp = `${file}.upd-${process.pid}-${randomUUID()}`;
+      fs.writeFileSync(tmp, out.join('\n'), 'utf8');
+      fs.renameSync(tmp, file);
+    } catch (error) {
+      log('[gate-events] 刷新既有事件失败（保留旧描述）：', String(error?.message ?? error).slice(0, 160));
+      return;
+    }
+    Object.assign(existing, next);
+  }
+
   function record(event = {}) {
     const stamp = now();
     const level = GATE_LEVELS.includes(event.level) ? event.level : classifyGateEvent(event);
@@ -173,15 +214,6 @@ export function createGateEventStore({ dir, log = () => {}, maxBytes = 2 * 1024 
       ack: false,
     };
     const window = Number.isFinite(Number(dedupeWindowMs)) && Number(dedupeWindowMs) > 0 ? Number(dedupeWindowMs) : 0;
-    // 持久化判重（只拦「故障且已拦截」类；同 key 未确认且未超 24h → 不追加新行）。
-    if (stored.dedupeKey && stored.kind === 'fault' && stored.action === 'blocked') {
-      const existing = findUnackedSameKey(stored.dedupeKey, stamp);
-      if (existing) {
-        // 内存窗口同步压住（本次进程内再刷同一件事也不会写盘）
-        dedupeSeen.set(stored.dedupeKey, { at: stamp, record: existing });
-        return existing;
-      }
-    }
     if (stored.dedupeKey && window > 0) {
       const prev = dedupeSeen.get(stored.dedupeKey);
       if (prev && stamp - prev.at < window) {
@@ -191,6 +223,18 @@ export function createGateEventStore({ dir, log = () => {}, maxBytes = 2 * 1024 
         return prev.record;
       }
       dedupeSeen.delete(stored.dedupeKey); // 重新排到 Map 末尾，近似 LRU
+    }
+    // 持久化判重（只拦「故障且已拦截」类；同 key 未确认且未超 24h → 不追加新行，
+    // 而是**原地刷新**既有行：时间与原因跟着最新一次事实走——比如从「连接断开」
+    // 演变成「需要扫码登录」，用户看到的是同一条还在发生的故障的最新状态，
+    // 而不是 N 条过期描述）。
+    if (stored.dedupeKey && stored.kind === 'fault' && stored.action === 'blocked') {
+      const existing = findUnackedSameKey(stored.dedupeKey, stamp);
+      if (existing) {
+        refreshPersistedRow(existing, stored);
+        dedupeSeen.set(stored.dedupeKey, { at: stamp, record: existing });
+        return existing;
+      }
     }
     try {
       rotateIfNeeded();

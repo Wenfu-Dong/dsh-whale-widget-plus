@@ -4305,6 +4305,20 @@ async function main(options = {}) {
     timer.unref?.();
   }
 
+  // 宿主侧（backend/lib/index.js）每次尝试拉起 SnowLuma 都会写这份状态文件。
+  // 弹窗决策要用它：自愈还在进行就不弹（系统正在修），自愈失败才弹、且弹真实原因——
+  // 否则就是「一边自动拉起一边报警让你去手动拉起」，报告问题而不是解决问题
+  // （2026-11-17 用户批评：弹窗说 code=1006、建议去启动 SnowLuma，而系统正在启动它）。
+  let launchStateCache = { at: 0, data: null };
+  function readSnowLumaLaunchState() {
+    const now = Date.now();
+    if (now - launchStateCache.at < 10_000) return launchStateCache.data;
+    let data = null;
+    try { data = JSON.parse(fs.readFileSync(path.join(SURFCORE_DIR, 'snowluma-launch-state.json'), 'utf8')); } catch { data = null; }
+    launchStateCache = { at: now, data };
+    return data;
+  }
+
   function notifySendChannelDown(reason = '') {
     if (snowlumaHealth.connected === true) return;
     const now = Date.now();
@@ -4318,8 +4332,42 @@ async function main(options = {}) {
     }
     if (now - snowlumaHealth.downSince < SNOWLUMA_DOWN_GRACE_MS) return;
     if (snowlumaHealth.downNotified) return;
+
+    // ── 自愈感知决策：先弄清「系统能不能自己修、修到哪一步了」，再决定弹不弹、弹什么 ──
+    const allowLaunch = cfg.snowluma?.allowLaunch === true;
+    const state = readSnowLumaLaunchState();
+    const stateAge = state?.at ? now - Number(state.at) : Infinity;
+    // 自愈正在拉起 SnowLuma（90 秒内的 launching 记录）：系统正在修，弹窗只会是噪音。
+    if (allowLaunch && state?.phase === 'launching' && stateAge < 90_000) {
+      log(`[snowluma] 通道未恢复，但自愈正在拉起 SnowLuma（${Math.round(stateAge / 1000)}s 前开始）——不弹窗，等结果`);
+      return;
+    }
+    // 上一次拉起成功但通道还没连上：连上只是时间问题（WS token 自愈 + 重连），
+    // 不弹；真连不上说明 SnowLuma 起来了但 OneBot 有问题，落到下面的通用告警。
+    if (allowLaunch && state?.phase === 'done' && state?.ok === true && !state?.needsLogin && stateAge < 3 * 60_000) {
+      log(`[snowluma] SnowLuma 已被自动拉起（${Math.round(stateAge / 1000)}s 前），等待 OneBot/WS 就绪——不弹窗`);
+      return;
+    }
+
+    let message = String(reason || 'SnowLuma 连接断开').slice(0, 300);
+    let recommendation = '启动或重启 SnowLuma（launcher.bat），确认 OneBot HTTP :3000 与 WS :3001 可用；恢复后会自动继续。';
+    if (allowLaunch === false) {
+      // 用户主动关了自动启动：这是唯一「必须用户动手」的情形，直说。
+      message = 'SnowLuma 未运行，且「允许插件打开 SnowLuma」处于关闭状态';
+      recommendation = '在 设置 → 维护 → SnowLuma 打开自动启动并保存（会自动拉起），或点概览「一键开始」手动启动。';
+    } else if (state?.phase === 'done' && stateAge < 6 * 3600_000) {
+      // 自愈试过了、失败了：弹真实原因（没装/路径不对/要扫码/启动报错），别再报 code=1006。
+      if (state.needsLogin === true) {
+        message = 'SnowLuma 已自动启动，但还没有登录 QQ：需要你扫码（只需一次）';
+        recommendation = String(state.message || '').slice(0, 300) || '打开 SnowLuma 控制台扫码登录 QQ；登录后桥接会自动连上。';
+      } else if (state.ok === false) {
+        message = `SnowLuma 自动启动未成功：${String(state.error || state.message || '原因未知').slice(0, 240)}`;
+        recommendation = '按上面的原因处理（常见：安装目录没指定 / QQ 没登录）；处理后系统会自动重试，不用重启 DSH。';
+      }
+      // ok===true 的成功态上面已经 return 了，这里只可能是 needsLogin/失败。
+    }
+
     snowlumaHealth.downNotified = true;
-    const message = String(reason || 'SnowLuma 连接断开').slice(0, 300);
     gateEvents.record({
       gate: 'snowluma',
       kind: 'fault',
@@ -4327,12 +4375,12 @@ async function main(options = {}) {
       action: 'blocked',
       reason: { code: 'SNOWLUMA_OFFLINE', message },
       impact: '当前无法把消息发到 QQ；通道恢复前会自动跳过主动唤醒，避免先生成后丢弃、白烧 token。',
-      recommendation: '启动或重启 SnowLuma（launcher.bat），确认 OneBot HTTP :3000 与 WS :3001 可用；恢复后会自动继续。',
+      recommendation,
       confidence: 'confirmed',
       dedupeKey: 'snowluma:send-channel-down',
     });
-    log(`❌ SnowLuma 发送通道不可用（已持续 ${Math.round((now - snowlumaHealth.downSince) / 1000)} 秒）；自动唤醒已暂停，避免空烧 token。`);
-    log('   处理：设置 → dsh-Dfy → 运行 → 概览 点「一键开始」，或手动运行 launcher.bat 并确认 HTTP :3000 / WS :3001 可用。');
+    log(`❌ SnowLuma 发送通道不可用（已持续 ${Math.round((now - snowlumaHealth.downSince) / 1000)} 秒）：${message}`);
+    log(`   处理：${recommendation}`);
   }
 
   function notifySendChannelUp() {

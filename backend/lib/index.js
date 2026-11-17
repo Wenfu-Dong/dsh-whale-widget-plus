@@ -2966,7 +2966,34 @@ ${body}`;
     return true;
   }
 
+  // SnowLuma 拉起状态落盘：桥接的弹窗决策要用（src/bridge.js readSnowLumaLaunchState）。
+  // 自愈还在进行→桥接不弹窗；自愈失败→弹真实原因而不是笼统的 code=1006。
+  // 所有启动路径（自愈巡检 / 一键开始 / 概览按钮）都走 launchSnowLuma，这里写一次全覆盖。
+  function recordSnowLumaLaunchState(patch) {
+    try {
+      fs.mkdirSync(STATE_DIR, { recursive: true });
+      writeJsonAtomic(path.join(STATE_DIR, 'snowluma-launch-state.json'), {
+        version: 1,
+        at: Date.now(),
+        ...patch,
+      });
+    } catch { /* 状态写不进去只影响弹窗文案，不影响拉起本身 */ }
+  }
+
   async function launchSnowLuma() {
+    recordSnowLumaLaunchState({ phase: 'launching' });
+    const result = await launchSnowLumaInner();
+    recordSnowLumaLaunchState({
+      phase: 'done',
+      ok: result?.ok !== false && result?.skipped !== true,
+      needsLogin: result?.needsLogin === true,
+      error: result?.ok === false ? String(result?.error ?? '').slice(0, 300) : '',
+      message: String(result?.message ?? result?.error ?? '').slice(0, 400),
+    });
+    return result;
+  }
+
+  async function launchSnowLumaInner() {
     if (process.env.SURFCORE_SKIP_AUTOSTART === '1') {
       return { ok: true, skipped: true, message: '测试环境：跳过打开 SnowLuma' };
     }
