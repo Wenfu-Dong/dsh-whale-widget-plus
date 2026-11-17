@@ -94,5 +94,10 @@ jobs:
       - name: 核心不变量审计
         run: node widget/tools/ci-audit.mjs --no-pack
 
+      # 发布前必须真实安装一遍（与 ci.yml 同一道闸门，见那里的详细注释）：
+      # 缺文件 / import 解析不到 / 宿主遮蔽 / postinstall 阻塞，全部拦在发版前。
+      - name: 安装模拟（pack → 干净安装 → import 全解析 → 宿主遮蔽扫描）
+        run: node scripts/install-simulation.mjs
+
       - name: 审计脚本自检
         run: node widget/tools/ci-audit-selftest.mjs

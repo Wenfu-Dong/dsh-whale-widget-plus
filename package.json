@@ -27,12 +27,12 @@
     "presets": "node scripts/build-agent-preset-patches.mjs",
     "snowluma": "node scripts/install-snowluma.mjs",
     "audit": "node widget/tools/ci-audit.mjs --no-pack",
+    "audit:install": "node scripts/install-simulation.mjs",
     "fix-host-shadow": "node scripts/fix-host-shadow.mjs",
     "postinstall": "node scripts/patch-snowluma-sdk.mjs && node scripts/build-agent-preset-patches.mjs",
     "prepublishOnly": "node scripts/publish-guard.mjs"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@snowluma/mcp": "^1.14.20",
     "@snowluma/sdk": "^1.14.20",

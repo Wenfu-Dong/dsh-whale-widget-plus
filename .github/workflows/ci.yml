@@ -104,6 +104,15 @@ jobs:
       - name: 核心不变量审计
         run: node widget/tools/ci-audit.mjs --no-pack
 
+      # 安装模拟（2026-11-17 新增）：npm pack → 解压到干净目录 → 真实 npm install（含
+      # postinstall）→ 遍历包内每条 import 验证可解析 → 宿主遮蔽扫描（dependencies
+      # 不得含 @deepseek-ai/*）→ 关键运行文件校验。专拦「装上插件 DSH 整体起不来 /
+      # 插件激活 ERR_MODULE_NOT_FOUND」这类只在安装环境里现形的故障（0.7.9 前的两起
+      # 真事故：packages/ 白名单漏包、宿主核心包被插件依赖遮蔽——静态读码看不见，
+      # 只有真装一遍才会炸）。发布流程（publish.yml）跑同一道闸门。
+      - name: 安装模拟（pack → 干净安装 → import 全解析 → 宿主遮蔽扫描）
+        run: node scripts/install-simulation.mjs
+
       # 审计脚本自己的自检：防止"断言空转"（把夹具改坏了审计还绿着）。
       - name: 审计脚本自检
         run: node widget/tools/ci-audit-selftest.mjs
