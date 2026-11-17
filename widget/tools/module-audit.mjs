@@ -320,11 +320,13 @@ if (cannedOffenders.length) {
 // 设置页把 allow / deny / allowAllWhenEmpty 写在合体层（AstrBot 路径读它），
 // 但内置桥只读 qq/config.json。2026-11-14 全量体检实测：只镜像了 admin，
 // 名单没投影 → 页面改白/黑名单后内置桥永远看不到。这里钉住三条投影 + 读取回落。
-const beSrc = readAll(path.join(ROOT, 'backend/lib/index.js'));
+// 配置保存已迁到 backend/lib/routes/config.js（组件化迁移 #11），扫描源要跟着扩展。
+const beSrc = readAll(path.join(ROOT, 'backend/lib/index.js'))
+  + '\n' + readAll(path.join(ROOT, 'backend/lib/routes/config.js'));
 const storeSrc = readAll(path.join(ROOT, 'packages/dsh-dfy-core/backend/lib/store.js'));
 const projection = ['mirror.allow', 'mirror.deny', 'mirror.allowAllWhenEmpty'].filter((k) => !beSrc.includes(k));
 if (projection.length) {
-  fail(`[配置投影] backend/lib/index.js 不再把 ${projection.join(' / ')} 同步进 QQ 配置；设置页改名单后内置桥看不到`);
+  fail(`[配置投影] 后端配置路由不再把 ${projection.join(' / ')} 同步进 QQ 配置；设置页改名单后内置桥看不到`);
 } else if (!/hasAllow[\s\S]{0,400}qq\.config\.allow/.test(storeSrc)) {
   fail('[配置投影] store.readAll 不再回落到 QQ 配置的 allow：设置页会把已生效的白名单显示成空白');
 } else ok('合体层名单（allow/deny/allowAllWhenEmpty）会投影到 QQ 配置，读取时也能回落');

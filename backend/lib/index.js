@@ -108,6 +108,7 @@ import { createPetPurposeService } from './pet-purpose.js';
 import { createPetApiService } from './pet-api.js';
 import { createUpdatesService, resumePendingApply, sanitizeComponentId } from './updates.js';
 import { createSnowLumaWebuiClient } from './snowluma-webui.js';
+import { registerMemoryTools, registerStickerTools } from './tool-registrations.js';
 import {
   adminFromSources, adminSummary, normalizeAdmin, projectAdminSave,
 } from '../../src/admin-identity.js';
@@ -135,6 +136,14 @@ import { createLearningLoop } from './learning-loop.js';
 import { createMemoryOrganizer } from './memory-organize.js';
 import { syncPersonaSystemPreset, personaPresetStatus } from './preset-sync.mjs';
 import { rollbackAutoPersona } from '../../src/learning-profile.js';
+// 路由功能族（组件化迁移 #11）：工厂 + 显式注入，路由分发仍留在本文件。
+import { createPersonaRoutes } from './routes/persona.js';
+import { createLearningRoutes } from './routes/learning.js';
+import { createBridgeProxyRoutes } from './routes/bridge-proxy.js';
+import { createPetPurposeRoutes } from './routes/pet-purpose.js';
+import { createDouyinRoutes } from './routes/douyin.js';
+import { createConfigRoutes } from './routes/config.js';
+import { createCharacterRoutes } from './routes/characters.js';
 
 // 版本号对外只有一个来源：合并后的 dsh-Dfy 主包（plugins/surfcore-next/package.json）。
 // surfcore 现在只是被 dsh-Dfy 复用的后端库，它自己的 package.json 版本不再对外展示；
@@ -245,202 +254,10 @@ function QQ_STATE_DIR() {
 export const name = 'surfcore';
 export const inject = ['webServer', 'connection', 'sessionController'];
 
-/**
- * 内置表情工具（属于本插件，不依赖外部表情插件）。
- * 参数必须是完整 JSON Schema——之前用简写导致注册阶段抛错、整个插件加载失败，已修正。
- */
-function registerStickerTools(ctx) {
-  const install = (scope) => {
-    try {
-      if (!scope?.tools?.register) return;
-      const kit = createNekoStickers({ dir: path.join(STATE_DIR, 'nekowhale-cache'), log: pluginLog });
-      const output = {
-        schema: {
-          type: 'object', additionalProperties: false,
-          properties: { text: { type: 'string' } }, required: ['text'],
-        },
-        render: (_args, value) => [{ type: 'text', text: String(value?.text ?? '') }],
-      };
-      scope.tools.register({
-        name: 'sticker_search',
-        description: '在大肥鱼表情包里按情绪/场景词搜表情，返回名字列表；挑好后用 sticker_send。',
-        parameters: {
-          type: 'object', additionalProperties: false,
-          properties: { query: { type: 'string', description: '情绪/场景词，如 摸鱼 被夸 无语 好累' } },
-          required: ['query'],
-        },
-        output,
-        async execute(args) {
-          const query = String(args?.query ?? '').trim();
-          const { items } = await kit.loadKit();
-          const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-          const hits = items
-            .map((item) => {
-              const hay = `${item.name} ${item.emotion || ''} ${(item.tags || []).join(' ')}`.toLowerCase();
-              let score = 0;
-              for (const word of words) if (word && hay.includes(word)) score += 1;
-              return { item, score };
-            })
-            .filter((row) => row.score > 0)
-            .sort((a, b) => b.score - a.score)
-            .slice(0, 8);
-          if (!hits.length) return { text: `没有搜到「${query}」相关表情，换个词。` };
-          return { text: hits.map(({ item }) => `${item.name}｜${item.emotion || '—'}｜${(item.tags || []).slice(0, 3).join(' ')}`).join('\n') };
-        },
-      });
-      scope.tools.register({
-        name: 'sticker_send',
-        description: '发一张大肥鱼表情。返回一行 Markdown 图片，把它原样放进你的回复里即可发到 QQ（不需要 token，也不要用 qq_send_sticker）。',
-        parameters: {
-          type: 'object', additionalProperties: false,
-          properties: { name: { type: 'string', description: 'sticker_search 返回的名字，或情绪词' } },
-          required: ['name'],
-        },
-        output,
-        async execute(args) {
-          const wanted = String(args?.name ?? '').trim();
-          if (!wanted) throw new Error('name 不能为空');
-          const { items } = await kit.loadKit();
-          const exact = items.find((item) => item.name === wanted || item.name.includes(wanted) || String(item.file || '').includes(wanted));
-          const item = exact || await kit.pick(wanted, { minScore: 1 });
-          if (!item) throw new Error(`没有匹配「${wanted}」的表情，先用 sticker_search 搜一下`);
-          const file = await kit.download(item);
-          // 关键：不能把本机绝对路径写进 Markdown。一旦图片行因任何原因降级成文字发出，
-          // 就会把「盘符:\Users\用户名\…」这类本机绝对路径公开（2026-11 真实隐私事故）。
-          // 只回「不含路径」的引用 token，由桥接在本地缓存目录里解析成图片。
-          const safeName = String(item.name || '').replace(/[[\]()]/g, '');
-          return { text: `![${safeName}](dshsticker:${encodeURIComponent(path.basename(file))})` };
-        },
-      });
-      pluginLog('[sticker] 内置表情工具已注册：sticker_search / sticker_send');
-    } catch (error) {
-      pluginLog('[sticker] 注册表情工具失败：', String(error?.message ?? error));
-    }
-  };
-  try {
-    if (typeof ctx?.inject === 'function') ctx.inject(['tools'], install);
-    else install(ctx);
-  } catch (error) {
-    pluginLog('[sticker] 延迟注册表情工具失败：', String(error?.message ?? error));
-  }
-}
-
-/**
- * 内置记忆工具（属于本插件）：把「记忆」从被动注入改成模型主动拉取/写入。
- *   · memory_search：按关键词检索她自己的记忆卡（top-k），想不起来就搜；
- *   · memory_remember：把重要的事直接写进记忆卡（走 addManualMemory 的脱敏管线）。
- * 设计（2026-11-09 用户定）：常驻注入只留身份头，细节全部按需检索——
- * 这是 token 减负的最后一环。
- */
-function registerMemoryTools(ctx) {
-  const install = (scope) => {
-    try {
-      if (!scope?.tools?.register) return;
-      const output = {
-        schema: {
-          type: 'object', additionalProperties: false,
-          properties: { text: { type: 'string' } }, required: ['text'],
-        },
-        render: (_args, value) => [{ type: 'text', text: String(value?.text ?? '') }],
-      };
-      const queryTokens = (q) => {
-        const s = String(q ?? '').toLowerCase();
-        const out = new Set();
-        for (const m of s.matchAll(/[a-z0-9][a-z0-9]+/g)) out.add(m[0]);
-        const cjk = s.replace(/[^\u4e00-\u9fff]/g, ' ');
-        for (const seg of cjk.split(/\s+/)) {
-          if (!seg) continue;
-          for (let i = 0; i + 1 < seg.length; i += 1) out.add(seg.slice(i, i + 2));
-        }
-        return [...out].slice(0, 24);
-      };
-      scope.tools.register({
-        name: 'memory_search',
-        description: '检索你自己的长期记忆（记忆卡）。想不起来某件事、或话题涉及过去经历时先用这个查，不要编造记忆。',
-        parameters: {
-          type: 'object', additionalProperties: false,
-          properties: {
-            query: { type: 'string', description: '检索词：人名/事件/关键词，如 主人 修复 B站 表情包' },
-            limit: { type: 'number', description: '返回条数（默认 5，最多 8）' },
-          },
-          required: ['query'],
-        },
-        output,
-        async execute(args) {
-          const query = String(args?.query ?? '').trim();
-          if (!query) return { text: '请给一个检索词。' };
-          const tokens = queryTokens(query);
-          if (!tokens.length) return { text: '检索词太短，给个具体的关键词。' };
-          const snapshot = memoryCardSnapshot(undefined, { recordLimit: 500 });
-          const records = Array.isArray(snapshot?.records) ? snapshot.records : [];
-          const scored = [];
-          for (const rec of records) {
-            if (rec.sensitive === true) continue;
-            const hay = `${rec.title || ''} ${rec.text || ''} ${(rec.tags || []).join(' ')}`.toLowerCase();
-            let score = 0;
-            for (const t of tokens) if (t && hay.includes(t)) score += 1;
-            if (score > 0) scored.push({ rec, score });
-          }
-          scored.sort((a, b) => b.score - a.score
-            || (b.rec.pinned === true) - (a.rec.pinned === true)
-            || String(b.rec.date ?? '').localeCompare(String(a.rec.date ?? '')));
-          const limit = Math.max(1, Math.min(8, Number(args?.limit) || 5));
-          const top = scored.slice(0, limit);
-          if (!top.length) return { text: '记忆里没有找到相关内容。' };
-          const lines = top.map(({ rec }) => {
-            const day = String(rec.date ?? '').slice(0, 10);
-            const scopeTag = rec.scope === 'pet' ? '（仅私下知道）' : '';
-            return `- ${day}${rec.pinned ? ' [锚点]' : ''} ${rec.title || ''}：${String(rec.text || '').slice(0, 160)}${scopeTag}`;
-          });
-          return { text: `【记忆检索 · ${top.length} 条】\n${lines.join('\n')}` };
-        },
-      });
-      scope.tools.register({
-        name: 'memory_remember',
-        description: '把重要的事写进你自己的长期记忆（会自动脱敏+进整理队列）。明确被要求记住、或出现约定/偏好/计划/重要近况时用。',
-        parameters: {
-          type: 'object', additionalProperties: false,
-          properties: {
-            text: { type: 'string', description: '要记住的事实（一句话，具体、可回忆）' },
-            title: { type: 'string', description: '可选：短标题' },
-            importance: { type: 'number', description: '重要度 20~100，默认 70' },
-          },
-          required: ['text'],
-        },
-        output,
-        async execute(args) {
-          const text = String(args?.text ?? '').trim();
-          if (text.length < 2) return { ok: false, text: '内容太短，没有记住。' };
-          const importance = Math.max(20, Math.min(100, Math.round(Number(args?.importance) || 70)));
-          const result = applyMemoryCardAction('add', {
-            text,
-            title: String(args?.title ?? text).slice(0, 40),
-            importance,
-            scope: 'qq',
-            tags: ['AI记录'],
-          }, {});
-          if (result?.ok === false) return { ok: false, text: `没记上：${String(result.error ?? '内容为空或重复')}` };
-          pluginLog('[memory] 模型写入记忆：', text.slice(0, 60));
-          return { ok: true, text: '已记进长期记忆。' };
-        },
-      });
-      pluginLog('[memory] 内置记忆工具已注册：memory_search / memory_remember');
-    } catch (error) {
-      pluginLog('[memory] 注册记忆工具失败：', String(error?.message ?? error));
-    }
-  };
-  try {
-    if (typeof ctx?.inject === 'function') ctx.inject(['tools'], install);
-    else install(ctx);
-  } catch (error) {
-    pluginLog('[memory] 延迟注册记忆工具失败：', String(error?.message ?? error));
-  }
-}
-
 export function apply(ctx) {
   ensureDirs();
-  registerStickerTools(ctx);
-  registerMemoryTools(ctx);
+  registerStickerTools({ ctx, stateDir: STATE_DIR, log: pluginLog });
+  registerMemoryTools({ ctx, log: pluginLog });
 
   // 上次的"退出后应用"可能没跑起来（Electron 宿主没带 ELECTRON_RUN_AS_NODE）：
   // 这里重新排队，用户下次退出 DSH 就会应用（2026-10-28 反馈：点几次都还是旧版本）。
@@ -616,6 +433,75 @@ export function apply(ctx) {
     },
     askBrain: (text, key) => rawChat.ask(text, { key }),
     sendQq: (args) => sendQqPrivate(args),
+  });
+
+  // ── 路由功能族（组件化）：依赖显式注入，分发仍在 handleHttp 里 ─────────────
+  const { handlePersona, handlePersonaClassify, handlePersonaState } = createPersonaRoutes({
+    API_PREFIX,
+    activePersonaLayers, resolvePersonaFile,
+    readTextFile, listBackups, mtimeIso, safeBackupName,
+    personaPresetStatus, syncPersonaSystemPreset,
+    BACKUP_DIR, backupFile, writeTextAtomic,
+    readCurrentCharacter, touchCharacter,
+    readUnified, readQqConfig, adminSummary,
+    personaClassifier, scanText,
+    personaSnapshot, setPersonaQuirks, setPersonaMood,
+    readJsonBody, json, pluginLog,
+  });
+  const { handleLearning } = createLearningRoutes({
+    API_PREFIX, learningLoop, rollbackAutoPersona, saveUnified, readJsonBody, json,
+  });
+  const { handleGroupPolicy, handleLimitMute } = createBridgeProxyRoutes({
+    callBridge, readJsonBody, json,
+  });
+  const { handlePet, handlePurpose, petChatTest } = createPetPurposeRoutes({
+    API_PREFIX, readQqConfig, readJsonBody, json,
+    petService, petChat, petPurpose, bridgeStatus, callBridge,
+  });
+  const { handleDouyin } = createDouyinRoutes({
+    readJsonBody, json, pluginLog, douyinSyncPolicy, readDouyinHistory,
+    douyinStatus, douyinOpen, douyinCurrent, douyinNext, douyinSearch, douyinStart, douyinStop,
+    douyinSummary, douyinComments, douyinNotices, douyinDebrief,
+    douyinChatStatus, douyinChatContacts, douyinChatConfigure, douyinChatStart, douyinChatStop,
+    douyinChatRead, douyinChatMinimize, douyinChatModels, douyinChatSetModel, douyinChatSetup,
+    douyinChatEnable, douyinChatRecover,
+    douyinImStatus, douyinImLoginQr, douyinImLoginSms, douyinImSubmitSms, douyinImLogout,
+    douyinImContacts, douyinImSaveConfig, douyinImStart, douyinImStop, douyinImSelftest,
+  });
+  const { handleConfig } = createConfigRoutes({
+    STATE_DIR, QQ_CONFIG, BILI_CONFIG,
+    readAll, configDefaults, pathSummary, listBackups, fileStamp, isStale,
+    readQqConfig, readBiliConfig, readUnified,
+    adminFromSources, projectAdminSave, normalizeAllowlist,
+    saveQqConfig, saveBiliConfig, saveUnified,
+    writeAlignmentBriefs, douyinSyncPolicy, douyinChatResume, startSyncTimer,
+    runMemoryCardMaintenance, syncQqToBili,
+    platformStartState, platformStartEnabled,
+    invalidateScheduler: () => { scheduler?.invalidate?.(); },
+    retireScheduler: async () => { await scheduler?.retire?.(); scheduler = null; },
+    resetSchedulerIdle: (reason) => { schedulerStatus = idleSchedulerStatus(reason); return schedulerStatus; },
+    startSchedulerNow,
+    stopBridge, startBridge, restartBridge, currentDshUrl,
+    readJsonBody, json,
+  });
+  const { handleCharacters } = createCharacterRoutes({
+    characterDetail, characterOverview, getCharacterMigration: () => characterMigration,
+    readCurrentCharacter, createCharacterFromPayload, switchCharacterEverywhere,
+    updateCharacterFromPayload, manualSnapshot, autoSnapshot, restoreCharacterSnapshot,
+    writeCharacterRolePointer, archiveBridgeRuntimeState, ensureCharacterSystem, deleteCharacter,
+    bridgeStatus, memoryCardIdle, stopAllBridgeSessions, stopBridge, startBridge, currentDshUrl,
+    runMemoryCardMaintenance,
+    prepareSchedulerForRestore: async (skipPlatform) => {
+      if (!skipPlatform && scheduler?.retire) await scheduler.retire();
+      scheduler = null;
+    },
+    resetSchedulerIdleForRestore: () => {
+      schedulerStatus = { running: false, startedAt: null, lastError: null, lastTickAt: null };
+      return schedulerStatus;
+    },
+    getSchedulerStatus: () => schedulerStatus,
+    startSchedulerNow,
+    readJsonBody, json, pluginLog,
   });
 
   // ── 能力槽（capability slot）─────────────────────────────────────────────
@@ -1573,501 +1459,6 @@ export function apply(ctx) {
         qqForBili: fileInfo(activeMemoryPaths().qqForBili),
       },
     };
-  }
-
-  // ── 配置读写 ────────────────────────────────────────────────────────────
-  async function handleConfig(req, res) {
-    if (req.method === 'GET') {
-      json(res, 200, {
-        ok: true, ...readAll(),
-        // 后端真实默认值（形状与 qq/bili/unified 一致、已脱敏）：设置页显示「默认是什么」
-        // 直接读这里，别在前端再抄一份默认值（两份必然漂移）。
-        defaults: configDefaults(),
-        paths: pathSummary(), backups: listBackups(20),
-        // 保存时回传这些戳：服务端据此判断"加载之后配置有没有被别处改过"
-        stamps: {
-          qq: fileStamp(QQ_CONFIG),
-          bili: fileStamp(BILI_CONFIG),
-          unified: fileStamp(path.join(STATE_DIR, 'config.json')),
-        },
-      });
-      return;
-    }
-    const body = await readJsonBody(req);
-    // 乐观并发：设置页加载后，如果配置被控制台/别的窗口改过，这里拒绝整份回写，
-    // 否则会把别人的修改覆盖掉（2026-10-29：语音开关"自己回弹"）。
-    const baseStamp = body?.baseStamp && typeof body.baseStamp === 'object' ? body.baseStamp : null;
-    const currentStamps = {
-      qq: fileStamp(QQ_CONFIG),
-      bili: fileStamp(BILI_CONFIG),
-      unified: fileStamp(path.join(STATE_DIR, 'config.json')),
-    };
-    if (baseStamp) {
-      const stale = ['qq', 'bili', 'unified'].filter((k) => isStale(baseStamp[k], currentStamps[k]));
-      if (stale.length) {
-        json(res, 409, {
-          ok: false, code: 'CONFIG_STALE',
-          error: `配置已被别处修改（${stale.join(' / ')}），本次保存未执行`,
-          hint: '点「重新读取」拿到最新配置后再改；直接覆盖会丢掉别人的修改',
-          stamps: currentStamps,
-        });
-        return;
-      }
-    }
-    const result = { ok: true, saved: {}, warnings: [] };
-    // ── 管理员：QQ ⇄ B站 默认是同一个人 ────────────────────────────────────
-    // 合体层 admin 是唯一真相；旧格式（qq.ownerQQ / bili.owner）是投影。
-    // 合并逻辑放在 src/admin-identity.js 的 projectAdminSave（纯函数，有单测），
-    // 这里只负责把结果写回三份文件，避免「只改了一边」。
-    // 管理员 B站 UID：显式拒绝非法值，别静默清空（用户会以为"填不进去"）
-    const rawAdminMid = String(body?.unified?.admin?.biliMid ?? '').trim();
-    if (rawAdminMid && !/^\d{4,20}$/.test(rawAdminMid)) {
-      json(res, 400, {
-        ok: false, code: 'admin.mid-invalid',
-        error: `管理员 B站 UID「${rawAdminMid}」不合法`,
-        hint: 'B站 UID 是 4~20 位数字（个人空间地址 space.bilibili.com/<数字>）；不要带字母或空格',
-      });
-      return;
-    }
-
-    const currentQq = readQqConfig().config;
-    const currentBili = readBiliConfig().config;
-    const currentUnifiedState = readUnified();
-    const beforePlatformStart = platformStartState();
-    // 合并默认值后 admin 永远存在（默认空串）；只有用户文件里明确写过才当"显式清空"，
-    // 否则会把旧字段 ownerQQ / owner.mid 当成没配置，保存时把两边投影抹掉。
-    const currentUnified = currentUnifiedState.hasAdmin
-      ? currentUnifiedState.config
-      : { ...currentUnifiedState.config, admin: undefined };
-    const currentAdmin = adminFromSources({ unified: currentUnified, qq: currentQq, bili: currentBili });
-    const planned = projectAdminSave({ current: currentAdmin, qq: body.qq, bili: body.bili, unified: body.unified });
-    if (planned.conflict) {
-      result.warnings.push('管理员卡片与高级参数同时改了 ownerQQ / owner.mid：已按管理员卡片对齐，两边会同时写成同一个人。');
-    }
-    body.qq = planned.qq;
-    body.bili = planned.bili;
-    body.unified = planned.unified;
-    // 名单 / 放行开关同 admin 一样以合体层为真相，但内置桥只读 qq/config.json
-    //（AstrBot 路径读合体层）。以前只镜像了 admin：页面改白/黑名单后内置桥永远看不到
-    //（2026-11-14 全量体检实测：合体层无 allow，qq/config.json 里才有效名单）。
-    // 只镜像用户**明确写过**的键，避免一次无关保存把 QQ 侧已有名单冲掉。
-    if (body.unified && typeof body.unified === 'object') {
-      const u = body.unified;
-      // 只同步「确实变了」的键：设置页保存时会把展示用名单一起带回来，
-      // 否则改任何无关设置都会多写一次 QQ 配置并提示重启桥接。
-      const cur = readQqConfig().config ?? {};
-      const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-      const mirror = {};
-      if (Object.prototype.hasOwnProperty.call(u, 'allow') && !same(u.allow, cur.allow)) mirror.allow = u.allow;
-      if (Object.prototype.hasOwnProperty.call(u, 'deny') && !same(u.deny, cur.deny)) mirror.deny = u.deny;
-      if (Object.prototype.hasOwnProperty.call(u, 'allowAllWhenEmpty') && u.allowAllWhenEmpty !== (cur.allowAllWhenEmpty === true)) {
-        mirror.allowAllWhenEmpty = u.allowAllWhenEmpty;
-      }
-      if (Object.keys(mirror).length) {
-        body.qq = { ...(body.qq && typeof body.qq === 'object' ? body.qq : {}), ...mirror };
-      }
-    }
-    if (body.qq && typeof body.qq === 'object') {
-      if (body.qq.allow && typeof body.qq.allow === 'object') {
-        const ownerForAllow = planned.unified?.admin?.qq || readQqConfig().config?.ownerQQ || '';
-        const { allow, warnings } = normalizeAllowlist({ allow: body.qq.allow, ownerQQ: ownerForAllow });
-        body.qq.allow = allow;
-        for (const w of warnings) result.warnings.push(`白名单：${w.message}`);
-      }
-      const saved = saveQqConfig(body.qq);
-      result.saved.qq = true;
-      result.qq = saved.config;
-      result.qqBackup = saved.backup;
-      result.warnings.push('QQ 配置已保存；桥接只在启动时读 config.json，需要「重启桥接」才会生效。');
-    }
-    if (body.bili && typeof body.bili === 'object') {
-      const saved = saveBiliConfig(body.bili);
-      result.saved.bili = true;
-      result.bili = saved.config;
-      result.biliBackup = saved.backup;
-      result.warnings.push('B站配置已保存；生物钟每轮重读配置，下一轮即生效。');
-    }
-    if (body.unified && typeof body.unified === 'object') {
-      const saved = saveUnified(body.unified);
-      result.saved.unified = true;
-      result.unified = saved.config;
-    }
-    if (result.saved.unified) {
-      try { writeAlignmentBriefs(); } catch (error) { result.warnings.push(`对齐简报重建失败：${error?.message ?? error}`); }
-      try { scheduler?.invalidate?.(); } catch {}
-      // 抖音的时段/额度投影到网页端账本；失败只提示，不影响其它设置落盘。
-      try { douyinSyncPolicy(); } catch (error) { result.warnings.push(`抖音时段同步失败：${String(error?.message ?? error).slice(0, 120)}`); }
-      // 群聊/私信开关变化后立即生效（关掉会停，开起来会在下一轮恢复）。
-      try { void douyinChatResume(); } catch {}
-      startSyncTimer();
-      // 改了记忆卡容量/注入上限后立刻重渲染，避免「设置保存了但提示词还是旧的」。
-      try {
-        const memoryCard = await runMemoryCardMaintenance({ config: readUnified().config.memoryCard });
-        result.memoryCard = { status: memoryCard.status, changed: memoryCard.changed };
-      } catch (error) {
-        result.warnings.push(`记忆卡重渲染失败：${error?.message ?? error}`);
-      }
-      if (readUnified().config.memory?.qqToBili?.enabled === true) {
-        try { result.qqMemory = syncQqToBili(); } catch (error) { result.warnings.push(`QQ→B站 同步失败：${error?.message ?? error}`); }
-      }
-    }
-    // 平台启动开关的副作用：保存即生效（不是等下次重启）。
-    // 用户关掉哪一边，就把正在跑的那一边停掉；重新打开则拉起来。
-    // 这是「是否启动」和「只是改个参数」的区别，不能只写文件不执行。
-    // 目的载体同理：切到桌宠后桥接下一次 tick 就不再自动出发（30 秒内生效），
-    // 桌宠那边由 petPurpose 接手；不用重启桥接。
-    if (result.saved.qq || result.saved.unified) {
-      const afterCarrier = readQqConfig().config?.purpose?.carrier === 'pet' ? 'pet' : 'qq';
-      const beforeCarrier = currentQq?.purpose?.carrier === 'pet' ? 'pet' : 'qq';
-      result.purposeCarrier = afterCarrier;
-      if (afterCarrier !== beforeCarrier) {
-        result.warnings.push(afterCarrier === 'pet'
-          ? '目的载体已切到「桌宠」：QQ 桥接不再自动主动搭话，改由桌宠气泡/语音发出（30 秒内生效，不用重启桥接）。'
-          : '目的载体已切回「QQ」：桌宠不再主动搭话，改由桥接私聊你（30 秒内生效）。');
-      }
-    }
-    const afterPlatformStart = platformStartState();
-    result.platformStart = afterPlatformStart;
-    if (result.saved.unified && process.env.SURFCORE_SKIP_AUTOSTART !== '1') {
-      if (!afterPlatformStart.bili && beforePlatformStart.bili) {
-        // 用 retire 而不是 stop：除了清定时器，还取消当前在途的 DSH 回合，
-        // 否则关掉开关后她这一轮仍可能把消息发出去（见 PITFALLS #62）。
-        try { await scheduler?.retire?.(); } catch (error) { result.warnings.push(`取消 B站 在途回合失败：${error?.message ?? error}`); }
-        scheduler = null;
-        schedulerStatus = idleSchedulerStatus('disabled');
-        result.scheduler = schedulerStatus;
-        result.warnings.push('B站 启动开关已关闭：生物钟已停止。');
-      } else if (afterPlatformStart.bili && !beforePlatformStart.bili) {
-        result.scheduler = startSchedulerNow();
-        result.warnings.push(result.scheduler.running
-          ? 'B站 启动开关已打开：生物钟已启动。'
-          : 'B站 启动开关已打开，但生物钟启动失败（看插件日志）。');
-      }
-      if (!afterPlatformStart.qq && beforePlatformStart.qq) {
-        const stopped = await stopBridge();
-        // 不要写 result.bridge：前端把它当成「已重启」并显示错误提示；启停单独记。
-        result.bridgeStop = stopped;
-        result.warnings.push(stopped.ok
-          ? 'QQ 启动开关已关闭：QQ 桥接已停止。'
-          : `QQ 启动开关已关闭，但桥接没停下来：${stopped.error ?? stopped.message ?? '未知'}`);
-      } else if (afterPlatformStart.qq && !beforePlatformStart.qq && body.restartBridge !== true) {
-        const started = await startBridge({ dshWebUrl: currentDshUrl() });
-        result.bridgeStart = started;
-        result.warnings.push(started.ok
-          ? 'QQ 启动开关已打开：QQ 桥接已启动。'
-          : `QQ 启动开关已打开，但桥接启动失败：${started.error ?? started.message ?? '未知'}`);
-      }
-    }
-    if (body.restartBridge === true) {
-      // 开关关掉时不允许「保存并重启」把 QQ 又拉起来；否则用户刚关的开关会被绕过。
-      if (!platformStartEnabled('qq')) {
-        result.warnings.push('QQ 启动开关已关闭：已跳过「保存并重启 QQ 桥接」。');
-      } else {
-        const restart = await restartBridge({ dshWebUrl: currentDshUrl() });
-        result.bridge = restart;
-        if (!restart.ok) result.warnings.push(`桥接重启失败：${restart.error ?? restart.message ?? '未知'}`);
-      }
-    }
-    // 保存成功后把新的文件戳一起回传：客户端据此更新下一次保存的 baseStamp。
-    // 不回传的话，第一次保存之后文件 mtime 已变，客户端仍拿旧戳 → 第二次保存必被判 CONFIG_STALE。
-    result.stamps = {
-      qq: fileStamp(QQ_CONFIG),
-      bili: fileStamp(BILI_CONFIG),
-      unified: fileStamp(path.join(STATE_DIR, 'config.json')),
-    };
-    json(res, 200, result);
-  }
-
-  // ── 角色人格 ────────────────────────────────────────────────────────────
-  async function handleCharacters(req, res, url) {
-    if (req.method === 'GET') {
-      const id = String(url.searchParams.get('id') ?? '').trim();
-      try {
-        json(res, 200, id ? characterDetail(id) : { ...characterOverview(), migration: characterMigration });
-      } catch (error) {
-        json(res, 404, { ok: false, error: String(error?.message ?? error) });
-      }
-      return;
-    }
-    let body = {};
-    try { body = await readJsonBody(req, 16 * 1024 * 1024); } catch { json(res, 400, { ok: false, error: '请求体不是合法 JSON' }); return; }
-    const action = String(body.action ?? '');
-    const id = String(body.id ?? readCurrentCharacter()?.id ?? '').trim();
-    try {
-      if (action === 'create') {
-        const created = createCharacterFromPayload(body);
-        if (body.load === true) {
-          const switched = await switchCharacterEverywhere(created.character.id);
-          json(res, 200, { ok: true, created, switched });
-        } else {
-          json(res, 200, created);
-        }
-        return;
-      }
-      if (action === 'load') {
-        if (!id) throw new Error('缺少角色 id');
-        json(res, 200, await switchCharacterEverywhere(id));
-        return;
-      }
-      if (action === 'update') {
-        if (!id) throw new Error('缺少角色 id');
-        json(res, 200, updateCharacterFromPayload(id, body));
-        return;
-      }
-      if (action === 'snapshot') {
-        if (!id) throw new Error('缺少角色 id');
-        json(res, 200, manualSnapshot(id, { label: String(body.label ?? '') }));
-        return;
-      }
-      if (action === 'auto-snapshot') {
-        if (!id) throw new Error('缺少角色 id');
-        json(res, 200, autoSnapshot(id, { force: body.force === true }));
-        return;
-      }
-      if (action === 'restore') {
-        if (!id) throw new Error('缺少角色 id');
-        const current = readCurrentCharacter();
-        if (!current || current.id !== id) throw new Error('只能回档当前角色；先加载这个角色再回档');
-        const skipPlatform = process.env.SURFCORE_DISABLE_PLATFORM_RESTART === '1';
-        const wasRunning = skipPlatform ? false : (await bridgeStatus()).running;
-        await memoryCardIdle();
-        if (!skipPlatform && scheduler?.retire) await scheduler.retire();
-        scheduler = null;
-        schedulerStatus = { running: false, startedAt: null, lastError: null, lastTickAt: null };
-        if (wasRunning) {
-          await stopAllBridgeSessions();
-          const stopped = await stopBridge();
-          if (!stopped.ok) {
-            if (!skipPlatform) startSchedulerNow();
-            throw new Error(`回档失败：QQ 桥接没停下来（${stopped.error || stopped.message || '未知原因'}）`);
-          }
-        }
-        const restored = restoreCharacterSnapshot(id, String(body.slot ?? ''));
-        writeCharacterRolePointer();
-        archiveBridgeRuntimeState();
-        await runMemoryCardMaintenance({}).catch((error) => pluginLog('回档后整理记忆卡失败：', error?.message ?? error));
-        if (wasRunning) await startBridge({ dshWebUrl: currentDshUrl() });
-        if (!skipPlatform) startSchedulerNow();
-        json(res, 200, { ...restored, bridgeRestarted: wasRunning, scheduler: schedulerStatus });
-        return;
-      }
-      if (action === 'migrate') {
-        json(res, 200, ensureCharacterSystem());
-        return;
-      }
-      if (action === 'delete') {
-        if (!id) throw new Error('缺少角色 id');
-        json(res, 200, deleteCharacter(id));
-        return;
-      }
-      json(res, 400, { ok: false, error: `未知 action：${action}` });
-    } catch (error) {
-      json(res, 400, { ok: false, error: String(error?.message ?? error) });
-    }
-  }
-
-  // ── 人设卡 ──────────────────────────────────────────────────────────────
-  async function handleGroupPolicy(req, res) {
-    try {
-      if (req.method === 'GET') {
-        const r = await callBridge('/api/socialV2/group-policy');
-        if (!r.ok) {
-          json(res, 502, { ok: false, code: 'GROUP_POLICY_BRIDGE', error: r.error || '桥接不可用', hint: '先启动 QQ 桥接，再刷新设置页' });
-          return;
-        }
-        json(res, 200, r.data);
-        return;
-      }
-      if (req.method === 'POST') {
-        const body = await readJsonBody(req);
-        const r = await callBridge('/api/socialV2/group-policy', { method: 'POST', body });
-        if (!r.ok) {
-          json(res, 502, { ok: false, code: 'GROUP_POLICY_SAVE', error: r.error || '保存失败', hint: '检查桥接是否运行，再重试' });
-          return;
-        }
-        json(res, 200, r.data);
-        return;
-      }
-      json(res, 405, { ok: false, code: 'GROUP_POLICY_METHOD', error: '只支持 GET/POST' });
-    } catch (error) {
-      json(res, 400, { ok: false, code: 'GROUP_POLICY_FAILED', error: String(error?.message ?? error), hint: '检查桥接与配置' });
-    }
-  }
-
-  async function handlePersonaClassify(req, res) {
-    if (req.method !== 'POST') {
-      json(res, 405, { ok: false, code: 'PERSONA_CLASSIFY_METHOD', error: '只支持 POST' });
-      return;
-    }
-    try {
-      const body = await readJsonBody(req);
-      const text = String(body.text ?? '');
-      const drafts = await personaClassifier.classify(text);
-      drafts.daily = withDailyIdentity(drafts.daily);
-      json(res, 200, { ok: true, drafts, note: '这是草稿；请检查/编辑后逐层保存。' });
-    } catch (error) {
-      json(res, 400, {
-        ok: false,
-        code: String(error?.code || 'PERSONA_CLASSIFY_FAILED'),
-        error: String(error?.message ?? error),
-        hint: String(error?.code || '').includes('UNAVAILABLE')
-          ? '确认 DSH 模型服务已就绪；也可以手动填写各层'
-          : '检查人格卡内容，或手动填写各层',
-      });
-    }
-  }
-
-  function personaIdentityLine() {
-    const cur = readCurrentCharacter();
-    const name = String(cur?.name || '').trim() || '这个角色';
-    let admin = {};
-    try {
-      const unified = readUnified();
-      const qq = readQqConfig();
-      admin = adminSummary(unified?.config?.admin ?? qq?.config?.admin);
-    } catch {}
-    const owner = String(admin?.displayName || '').trim() || '主人';
-    return `你是${name}；你的主人是${owner}。`;
-  }
-
-  function withDailyIdentity(text, identity = personaIdentityLine()) {
-    const body = String(text ?? '').trim();
-    if (!body) return identity;
-    if (body.includes(identity)) return body;
-    // 已有明确“我是谁/主人是谁”的旧日常也保留，不重复堆。
-    if (/你是|我是/.test(body) && /主人/.test(body)) return body;
-    return `${identity}
-
-${body}`;
-  }
-
-  async function handleLimitMute(req, res) {
-    if (req.method !== 'POST') { json(res, 405, { ok: false, code: 'LIMIT_MUTE_METHOD', error: '只支持 POST' }); return; }
-    try {
-      const body = await readJsonBody(req);
-      const r = await callBridge('/api/socialV2/limit-mute', { method: 'POST', body });
-      if (!r.ok) { json(res, 502, { ok: false, code: 'LIMIT_MUTE_BRIDGE', error: r.error || '桥接不可用', hint: '先启动/重启 QQ 桥接' }); return; }
-      json(res, 200, r.data);
-    } catch (error) {
-      json(res, 400, { ok: false, code: 'LIMIT_MUTE_FAILED', error: String(error?.message ?? error), hint: '刷新错误报告后重试' });
-    }
-  }
-
-  async function handlePersona(req, res) {
-    const layerPaths = () => {
-      const layers = activePersonaLayers();
-      return layers ? {
-        core: layers.core || resolvePersonaFile(),
-        daily: layers.daily,
-        tone: layers.tone,
-        examples: layers.examples,
-        scenes: layers.scenes,
-        scenesDir: layers.scenesDir,
-      } : { core: resolvePersonaFile(), daily: '', tone: '', examples: '', scenes: {}, scenesDir: '' };
-    };
-    const sceneLabels = { 'qq-group': 'QQ 群聊', 'qq-private': 'QQ 私聊', bili: 'B站', pet: '桌宠' };
-    if (req.method === 'GET') {
-      const paths = layerPaths();
-      const core = readTextFile(paths.core);
-      const daily = paths.daily ? withDailyIdentity(readTextFile(paths.daily)) : withDailyIdentity('');
-      const scenes = {};
-      for (const [id, file] of Object.entries(paths.scenes || {})) {
-        scenes[id] = { path: file, text: readTextFile(file), chars: readTextFile(file).length };
-      }
-      const backups = listBackups(120).filter((item) => /^persona(?:-|$)/.test(item.name));
-      json(res, 200, {
-        ok: true,
-        path: paths.core,
-        text: core,
-        chars: core.length,
-        mtime: mtimeIso(paths.core),
-        layers: {
-          core: { path: paths.core, text: core, chars: core.length },
-          tone: { path: paths.tone, text: readTextFile(paths.tone), chars: readTextFile(paths.tone).length },
-          examples: { path: paths.examples, text: readTextFile(paths.examples), chars: readTextFile(paths.examples).length },
-          daily: { path: paths.daily, text: daily, chars: daily.length },
-          scenes,
-        },
-        sceneLabels,
-        backups,
-        // 设置页要显示「人格有没有进 Agent 预设、要不要重启」。
-        presetSync: (() => { try { return personaPresetStatus(); } catch (error) { return { ok: false, error: String(error?.message ?? error) }; } })(),
-        note: '人格卡分层：persona.md 是核心（身份+底线）；persona.tone.md 是行为规则；persona.examples.md 是对话语料；persona.daily.md 是日常；persona.scenes/* 是场景。所有层都手动编辑，不会自动改写。',
-      });
-      return;
-    }
-    const body = await readJsonBody(req);
-    if (body.action === 'restore') {
-      const name = safeBackupName(body.name);
-      if (!name) { json(res, 400, { ok: false, error: '备份名非法' }); return; }
-      const source = path.join(BACKUP_DIR, name);
-      if (!fs.existsSync(source)) { json(res, 404, { ok: false, code: 'PERSONA_BACKUP_MISSING', error: '备份不存在', hint: '刷新备份列表后重试' }); return; }
-      const paths = layerPaths();
-      let target = paths.core;
-      let label = 'persona';
-      if (name.startsWith('persona-daily-')) { target = paths.daily; label = 'persona-daily'; }
-      else if (name.startsWith('persona-tone-')) { target = paths.tone; label = 'persona-tone'; }
-      else if (name.startsWith('persona-examples-')) { target = paths.examples; label = 'persona-examples'; }
-      else if (name.startsWith('persona-scene-')) {
-        const scene = Object.keys(sceneLabels).find((id) => name.startsWith(`persona-scene-${id}-`));
-        if (!scene) { json(res, 400, { ok: false, code: 'PERSONA_SCENE_UNKNOWN', error: '备份对应的场景未知', hint: '检查备份文件名' }); return; }
-        target = paths.scenes?.[scene] || '';
-        label = `persona-scene-${scene}`;
-      }
-      if (!target) { json(res, 400, { ok: false, code: 'PERSONA_LAYER_UNAVAILABLE', error: '这个层在当前角色里没有路径（可能未启用角色系统）', hint: '先创建/加载角色' }); return; }
-      backupFile(target, label);
-      fs.copyFileSync(source, target);
-      const cur = readCurrentCharacter();
-      if (cur) touchCharacter(cur.id);
-      syncPersonaSystemPreset({ log: pluginLog });
-      json(res, 200, { ok: true, restored: name, target, text: readTextFile(target), layers: layerPaths() });
-      return;
-    }
-    const layer = String(body.layer || 'core');
-    const scene = String(body.scene || '');
-    const paths = layerPaths();
-    let target = paths.core;
-    let label = 'persona';
-    if (layer === 'tone') {
-      target = paths.tone;
-      label = 'persona-tone';
-    } else if (layer === 'examples') {
-      target = paths.examples;
-      label = 'persona-examples';
-    } else if (layer === 'daily') {
-      target = paths.daily;
-      label = 'persona-daily';
-    } else if (layer === 'scene') {
-      if (!sceneLabels[scene]) { json(res, 400, { ok: false, code: 'PERSONA_SCENE_UNKNOWN', error: `未知场景：${scene}`, hint: '只支持 qq-group / qq-private / bili / pet' }); return; }
-      target = paths.scenes?.[scene] || '';
-      label = `persona-scene-${scene}`;
-    }
-    if (!target) {
-      json(res, 400, { ok: false, code: 'PERSONA_LAYER_UNAVAILABLE', error: '这个层在当前角色里没有路径（可能未启用角色系统）', hint: '先创建/加载角色' });
-      return;
-    }
-    const text = String(body.text ?? '');
-    if (layer === 'core' && text.length < 50) { json(res, 400, { ok: false, code: 'PERSONA_CORE_TOO_SHORT', error: '人格核心太短（至少 50 字）', hint: '核心卡是每次注入的底座，不能留空' }); return; }
-    if (text.length > 64 * 1024) { json(res, 400, { ok: false, code: 'PERSONA_TOO_LARGE', error: '人格内容超过 64KB', hint: '拆成核心/场景/日常层，或精简内容' }); return; }
-    const scan = scanText(text);
-    const severe = scan.secrets.length > 0 || scan.pii.some((hit) => hit.severe);
-    if (severe) {
-      json(res, 400, {
-        ok: false,
-        code: 'PERSONA_SENSITIVE',
-        error: '人格内容里命中密钥/密码/身份证/住址规则，拒绝保存',
-        hint: '删掉这些内容后再保存；人格卡不应包含凭据',
-        labels: [...new Set([...scan.secrets, ...scan.pii.filter((h) => h.severe)].map((h) => h.label))],
-      });
-      return;
-    }
-    const backup = backupFile(target, label);
-        writeTextAtomic(target, text.endsWith('\n') ? text : `${text}\n`);
-    const cur = readCurrentCharacter();
-    if (cur) touchCharacter(cur.id);
-    // 人格层变更 → 同步烘焙进 Agent 预设的 system prompt（重启 DSH 后生效）。
-    const presetSync = syncPersonaSystemPreset({ log: pluginLog });
-    json(res, 200, { ok: true, layer, scene: layer === 'scene' ? scene : '', chars: text.length, backup, path: target, layers: layerPaths(), presetSync: { changed: presetSync.changed, restartRequired: presetSync.changed } });
   }
 
   // ── 记忆 ────────────────────────────────────────────────────────────────
@@ -3569,263 +2960,6 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
     json(res, 404, { ok: false, error: `未知 SnowLuma 动作：${action}` });
   }
 
-  // 桌宠载体状态：只读（小鲸鱼插件是否已装/在用）。Electron 安装、启动、卸载接口已下线
-  // （pet.js 只剩 status）；但「专注模式」「测试一句话」仍是设置页在用接口，照 docs/PET.md 保留。
-  async function handlePet(req, res, url) {
-    const suffix = url.pathname.slice(`${API_PREFIX}/pet`.length) || '/status';
-    const method = String(req.method || 'GET').toUpperCase();
-    if (method === 'GET' && suffix === '/status') { json(res, 200, petService.status()); return; }
-    if (method === 'POST' && suffix === '/focus') {
-      let body = {};
-      try { body = await readJsonBody(req); } catch { json(res, 400, { ok: false, error: '请求体不是合法 JSON' }); return; }
-      json(res, 200, { ok: true, ...petChat.setFocus(body.enabled === true, 'settings') });
-      return;
-    }
-    if (method === 'POST' && suffix === '/chat-test') {
-      let body = {};
-      try { body = await readJsonBody(req); } catch { json(res, 400, { ok: false, error: '请求体不是合法 JSON' }); return; }
-      json(res, 200, await petChatTest(body));
-      return;
-    }
-    // 演示气泡：不生成模型回复，只推一条假事件，用来验证「插件 → 挂件 → 气泡」这条路。
-    // 会顺带告诉前端挂件此刻是否在轮询（widgetOnline），排查时不用靠猜。
-    if (method === 'POST' && suffix === '/bubble-demo') {
-      const modality = String(readQqConfig().config?.purpose?.petModality ?? 'text') === 'voice' ? 'voice' : 'text';
-      const text = '演示：气泡链路正常，能弹出这条就说明 QQ 回复也会这样弹出来。';
-      const eventId = petChat.emit({
-        type: 'reply',
-        text,
-        modality,
-        speak: modality === 'voice',
-        demo: true,
-        messageId: 'demo',
-      });
-      const presence = petChat.status().presence ?? {};
-      json(res, 200, {
-        ok: true,
-        eventId,
-        widgetOnline: presence.online === true,
-        speak: modality === 'voice',
-        message: presence.online === true
-          ? `已推送到气泡（${modality === 'voice' ? "会朗读" : "纯文字"}）`
-          : '已推送，但挂件没在轮询：桌面气泡收不到（检查小鲸鱼挂件页面是否开着）',
-        hint: presence.online === true ? '' : '挂件没在线时不会弹气泡；重开 DSH 并确保小鲸鱼挂件页面开着',
-      });
-      return;
-    }
-    json(res, 404, { ok: false, error: `桌宠安装/启动接口已下线：${suffix}` });
-  }
-
-  // ── 人格状态（情绪 / 口头禅）：读改都走这里，QQ/桌宠/抖音共用 ──────────────
-  // 注意：不要叫 handlePersona —— 上面已有同名函数（人格四层编辑），同名声明会把它整个覆盖掉，
-  //       /persona 就会拿不到 url 参数而报 "reading 'pathname'"（2026-11 实测的读取失败）。
-  async function handlePersonaState(req, res, url) {
-    const parsed = url && typeof url.pathname === 'string' ? url : new URL(req.url || '/', 'http://127.0.0.1');
-    const suffix = parsed.pathname.slice(`${API_PREFIX}/persona`.length) || '/state';
-    const method = String(req.method || 'GET').toUpperCase();
-    if (method === 'GET' && (suffix === '' || suffix === '/state')) {
-      json(res, 200, personaSnapshot());
-      return;
-    }
-    if (method === 'POST' && suffix === '/config') {
-      let body = {};
-      try { body = await readJsonBody(req); } catch { json(res, 400, { ok: false, error: '请求体不是合法 JSON' }); return; }
-      try {
-        if (Array.isArray(body.quirks)) setPersonaQuirks(body.quirks);
-        if (typeof body.mood === 'string') setPersonaMood(body.mood, String(body.note || ''));
-        json(res, 200, personaSnapshot());
-      } catch (error) {
-        json(res, 400, { ok: false, error: String(error?.message ?? error).slice(0, 160) });
-      }
-      return;
-    }
-    json(res, 404, { ok: false, error: `未知人格接口：${suffix}` });
-  }
-
-  // ── 自我学习：贴吧 / B站 / 抖音 → 经历 + 近况（读状态 / 立即学 / 回滚）────────
-  async function handleLearning(req, res, url) {
-    const parsed = url && typeof url.pathname === 'string' ? url : new URL(req.url || '/', 'http://127.0.0.1');
-    const suffix = parsed.pathname.slice(`${API_PREFIX}/learning`.length) || '/status';
-    const method = String(req.method || 'GET').toUpperCase();
-    if (method === 'GET' && (suffix === '' || suffix === '/status')) {
-      json(res, 200, learningLoop.status());
-      return;
-    }
-    if (method === 'POST' && suffix === '/run') {
-      let body = {};
-      try { body = await readJsonBody(req); } catch { body = {}; }
-      json(res, 200, await learningLoop.run({ force: body.force !== false }));
-      return;
-    }
-    if (method === 'POST' && suffix === '/rollback') {
-      json(res, 200, rollbackAutoPersona());
-      return;
-    }
-    if (method === 'POST' && suffix === '/config') {
-      let body = {};
-      try { body = await readJsonBody(req); } catch { json(res, 400, { ok: false, error: '请求体不是合法 JSON' }); return; }
-      const patch = {};
-      if (typeof body.enabled === 'boolean') patch.enabled = body.enabled;
-      if (typeof body.diary === 'boolean') patch.diary = body.diary;
-      if (Number.isFinite(Number(body.intervalHours))) patch.intervalHours = Math.max(1, Math.min(48, Math.round(Number(body.intervalHours))));
-      if (Number.isFinite(Number(body.minItems))) patch.minItems = Math.max(1, Math.min(40, Math.round(Number(body.minItems))));
-      if (Object.keys(patch).length) {
-        saveUnified({ learning: patch });
-        // 间隔/开关变了：重建定时器，免得要等下次重启才生效。
-        try { learningLoop.stop(); learningLoop.start(); } catch {}
-      }
-      json(res, 200, learningLoop.status());
-      return;
-    }
-    json(res, 404, { ok: false, error: `未知学习接口：${suffix}` });
-  }
-
-  // 设置页「测一句话」：同样要弹到桌宠气泡（docs/PET.md）；/pet/chat-test 和 /purpose/pet-chat 共用。
-  async function petChatTest(body = {}) {
-    const result = await petChat.chat({ text: body.text || '在吗', modality: body.modality === 'voice' ? 'voice' : 'text' });
-    if (result.ok && result.reply) {
-      petChat.emit({
-        type: 'reply',
-        text: String(result.reply.text ?? ''),
-        modality: result.reply.modality === 'voice' ? 'voice' : 'text',
-        speak: result.reply.modality === 'voice',
-        audioKey: result.reply.audioKey || '',
-        messageId: result.reply.id || '',
-      });
-    }
-    return result;
-  }
-
-
-  // ── 目的机制（设置页「目的」）：按当前载体路由到 Bridge 或桌宠 ─────────────
-  async function purposeAvailability() {
-    const petStatus = petService.status();
-    const online = petChat.online();
-    const external = petStatus.external ?? {};
-    let bridge = null;
-    try { bridge = await bridgeStatus(); } catch (error) { bridge = { ok: false, running: false, error: String(error?.message ?? error) }; }
-    return {
-      pet: {
-        // 用户实际装的是 dsh-Dfy 挂件时，它就算「已装/在用」，
-        // 不能因为没装 Electron 桌宠就一直显示「未安装」。
-        installed: Boolean(petStatus.installed || external.installed),
-        running: Boolean(petStatus.running || external.active),
-        online: Boolean(online.online || external.active),
-        external: {
-          kind: String(external.kind || ''),
-          name: String(external.name || ''),
-          version: String(external.version || ''),
-          active: external.active === true,
-        },
-        lastPollAt: online.lastSeenAt || 0,
-        roleName: petChat.roleInfo().name,
-      },
-      qq: {
-        running: Boolean(bridge?.running),
-        mode: bridge?.mode || bridge?.status?.mode || null,
-        ok: bridge?.ok !== false,
-        error: bridge?.error || '',
-      },
-    };
-  }
-
-  async function handlePurpose(req, res, url) {
-    const suffix = url.pathname.slice(`${API_PREFIX}/purpose`.length) || '/status';
-    const method = String(req.method || 'GET').toUpperCase();
-    const carrier = readQqConfig().config?.purpose?.carrier === 'pet' ? 'pet' : 'qq';
-    const availability = await purposeAvailability();
-    try {
-      if (suffix === '/status' && method === 'GET') {
-        if (carrier === 'pet') {
-          const st = petPurpose.status();
-          json(res, 200, {
-            ok: true,
-            source: 'pet',
-            carrier: 'pet',
-            availability,
-            enabled: st.enabled,
-            modality: st.modality,
-            fallbackToQQ: st.fallbackToQQ,
-            ownerUin: st.ownerUin,
-            ownerName: st.ownerName,
-            focus: st.focus,
-            config: st.config,
-            state: st.state,
-            online: st.online,
-            lastTickAt: st.lastTickAt,
-            lastError: st.lastError,
-            lastFallback: st.lastFallback,
-          });
-          return;
-        }
-        if (!availability.qq.running) {
-          json(res, 200, {
-            ok: false,
-            source: 'qq',
-            carrier: 'qq',
-            availability,
-            focus: petChat.focusEnabled(),
-            error: 'QQ 桥接没在运行：先在「QQ」页启动，或者把载体切到桌宠',
-            config: readQqConfig().config?.purpose ?? {},
-            state: null,
-          });
-          return;
-        }
-        const remote = await callBridge('/api/purpose/status', { timeoutMs: 8000 });
-        const data = remote?.data ?? {};
-        json(res, remote?.status || 200, {
-          ...data,
-          source: 'qq',
-          carrier: 'qq',
-          availability,
-          focus: petChat.focusEnabled(),
-          ok: data.ok !== false,
-          error: data.ok === false ? (data.error || '读取目的状态失败') : '',
-        });
-        return;
-      }
-      if (suffix === '/preview' && method === 'POST') {
-        if (carrier === 'pet') {
-          const result = await petPurpose.preview();
-          json(res, result.ok ? 200 : 400, { ...result, source: 'pet', carrier: 'pet', availability });
-          return;
-        }
-        if (!availability.qq.running) {
-          json(res, 409, { ok: false, error: 'QQ 桥接没在运行，无法预览 QQ 载体的目的回合', availability });
-          return;
-        }
-        const remote = await callBridge('/api/purpose/preview', { method: 'POST', body: {}, timeoutMs: 20000 });
-        json(res, remote?.status || 200, { ...(remote?.data ?? {}), source: 'qq', carrier: 'qq', availability });
-        return;
-      }
-      if (suffix === '/run' && method === 'POST') {
-        const body = await readJsonBody(req);
-        if (carrier === 'pet') {
-          const result = await petPurpose.run({ force: body.force !== false });
-          json(res, result.ok ? 200 : 409, { ...result, source: 'pet', carrier: 'pet', availability });
-          return;
-        }
-        if (!availability.qq.running) {
-          json(res, 409, { ok: false, error: 'QQ 桥接没在运行，无法让 QQ 载体出发', availability });
-          return;
-        }
-        const remote = await callBridge('/api/purpose/run', { method: 'POST', body: { force: body.force !== false }, timeoutMs: 30000 });
-        json(res, remote?.status || 200, { ...(remote?.data ?? {}), source: 'qq', carrier: 'qq', availability });
-        return;
-      }
-      if (suffix === '/pet-chat' && method === 'POST') {
-        // 设置页测一句话（不占主动搭话额度），回复同时弹到桌宠气泡。
-        const body = await readJsonBody(req);
-        const result = await petChatTest(body);
-        json(res, result.ok ? 200 : 400, result);
-        return;
-      }
-      json(res, 404, { ok: false, error: `未知目的接口：${suffix}` });
-    } catch (error) {
-      json(res, 500, { ok: false, error: String(error?.message ?? error) });
-    }
-  }
-
   // ── 一键启动 / 停止（概览、QQ、B站共用同一份状态）────────────
   // 2026-11 精简：语音包与桌宠都不是可启动组件了（语音包后端已删，桌宠由挂件提供）。
   const LAUNCH_IDS = ['qq', 'bili'];
@@ -4830,71 +3964,6 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
     }
     pluginLog(`[模型] 全局模型 → ${provider ? `${provider}/${model}` : '跟随 DSH 默认'}`);
     json(res, 200, { ...(await modelCatalog()), ok: true, defaultSaved });
-  }
-
-  // ── 抖音（第 4 个平台：网页版 + 本机 Edge，登录在专用窗口里人工完成）──────
-  // GET  /douyin            → 状态（开关 / 时段 / 今日额度 / 窗口 / 上次总结）
-  // GET  /douyin/history    → 看过的视频（本地记录）
-  // POST /douyin  {action}  → open / current / next / search / start / stop / apply / summary
-  async function handleDouyin(req, res, url) {
-    const pathname = url.pathname;
-    if (req.method === 'GET' && pathname.endsWith('/history')) {
-      try { json(res, 200, readDouyinHistory({ limit: Number(url.searchParams.get('limit')) || 300 })); }
-      catch (error) { json(res, 500, { ok: false, error: String(error?.message ?? error) }); }
-      return;
-    }
-    if (req.method === 'GET') { json(res, 200, await douyinStatus()); return; }
-    if (req.method !== 'POST') { json(res, 405, { ok: false, error: '只支持 GET / POST' }); return; }
-    let body = {};
-    try { body = await readJsonBody(req); } catch { json(res, 400, { ok: false, error: '请求体不是合法 JSON' }); return; }
-    const action = String(body.action ?? '');
-    if (!['open', 'current', 'next', 'search', 'start', 'stop', 'apply', 'status', 'summary', 'comments', 'notices', 'debrief',
-      'chat-status', 'chat-contacts', 'chat-configure', 'chat-start', 'chat-stop', 'chat-read', 'chat-minimize', 'chat-models', 'chat-set-model', 'chat-setup', 'chat-recover', 'chat-enable',
-      'im-status', 'im-login-qr', 'im-login-sms', 'im-sms-code', 'im-logout', 'im-contacts', 'im-config', 'im-start', 'im-stop', 'im-selftest'].includes(action)) {
-      json(res, 400, { ok: false, error: `未知抖音动作：${action || '（空）'}` });
-      return;
-    }
-    try {
-      let result;
-      if (action === 'open') result = await douyinOpen();
-      else if (action === 'current') result = await douyinCurrent();
-      else if (action === 'next') result = await douyinNext();
-      else if (action === 'search') result = await douyinSearch(body.query);
-      else if (action === 'start') result = await douyinStart({ reason: String(body.reason || '手动'), maxVideos: body.maxVideos, minutes: body.minutes });
-      else if (action === 'stop') result = await douyinStop();
-      else if (action === 'summary') result = douyinSummary(body.note);
-      else if (action === 'comments') result = await douyinComments({ awemeId: body.awemeId, url: body.url, max: body.max, images: body.images !== false });
-      else if (action === 'notices') result = await douyinNotices({ count: body.count });
-      else if (action === 'debrief') result = await douyinDebrief({ awemeId: body.awemeId, url: body.url, danmakuLimit: body.danmakuLimit, commentMax: body.commentMax });
-      else if (action === 'chat-status') result = await douyinChatStatus();
-      else if (action === 'chat-contacts') result = await douyinChatContacts();
-      else if (action === 'chat-configure') result = await douyinChatConfigure({ recipientIds: body.recipientIds, mentionNames: body.mentionNames, allowConversationOnly: body.allowConversationOnly });
-      else if (action === 'chat-start') result = await douyinChatStart();
-      else if (action === 'chat-stop') result = await douyinChatStop();
-      else if (action === 'chat-read') result = await douyinChatRead(body.recipientId);
-      else if (action === 'chat-minimize') result = await douyinChatMinimize();
-      else if (action === 'chat-models') result = await douyinChatModels();
-      else if (action === 'chat-set-model') result = await douyinChatSetModel({ provider: body.provider, model: body.model });
-      else if (action === 'chat-setup') result = await douyinChatSetup({ recipientIds: body.recipientIds, mentionNames: body.mentionNames });
-      else if (action === 'chat-enable') result = await douyinChatEnable();
-      else if (action === 'chat-recover') result = await douyinChatRecover();
-      else if (action === 'im-status') result = douyinImStatus();
-      else if (action === 'im-login-qr') result = await douyinImLoginQr();
-      else if (action === 'im-login-sms') result = await douyinImLoginSms(body.mobile);
-      else if (action === 'im-sms-code') result = await douyinImSubmitSms(body.code);
-      else if (action === 'im-logout') result = await douyinImLogout();
-      else if (action === 'im-contacts') result = await douyinImContacts();
-      else if (action === 'im-config') result = douyinImSaveConfig(body);
-      else if (action === 'im-start') result = await douyinImStart();
-      else if (action === 'im-stop') result = await douyinImStop();
-      else if (action === 'im-selftest') result = await douyinImSelftest();
-      else { if (action === 'apply') douyinSyncPolicy(); result = await douyinStatus(); }
-      if (result?.ok === false) { json(res, 400, result); return; }
-      json(res, 200, { ...result, ok: true });
-    } catch (error) {
-      pluginLog(`[抖音] ${action} 失败：${String(error?.message ?? error).slice(0, 200)}`);
-      json(res, 400, { ok: false, code: String(error?.code ?? ''), error: String(error?.message ?? error) });
-    }
   }
 
   // ── 组件更新 ────────────────────────────────────────────────────────────

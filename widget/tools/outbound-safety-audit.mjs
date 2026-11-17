@@ -130,7 +130,11 @@ for (const file of sourceFiles) {
   });
 }
 // 表情工具必须使用 dshsticker 引用
-const pluginIndex = read(path.join(ROOT, 'backend', 'lib', 'index.js'));
+// 工具注册可能拆到独立文件（tool-registrations.js），所以把这一层也拼进来。
+const pluginIndex = [
+  read(path.join(ROOT, 'backend', 'lib', 'index.js')),
+  read(path.join(ROOT, 'backend', 'lib', 'tool-registrations.js')),
+].join('\n');
 const stickerBlock = (() => {
   const m = /name:\s*'sticker_send'[\s\S]{0,1200}?return\s*\{\s*text:\s*`([^`]*)`/.exec(pluginIndex);
   return m ? m[1] : '';
@@ -172,7 +176,10 @@ ok(`路径脱敏行为用例 ${REDACT_CASES.length} 条`);
       : []
   );
   if (!whitelist.size) fail('解析 qq-tool-restrict.mjs 的 SAFE_EXACT 白名单失败');
-  const pluginIndexSrc = read(path.join(ROOT, 'backend', 'lib', 'index.js'));
+  const pluginIndexSrc = [
+    read(path.join(ROOT, 'backend', 'lib', 'index.js')),
+    read(path.join(ROOT, 'backend', 'lib', 'tool-registrations.js')),
+  ].join('\n');
   const registered = [...pluginIndexSrc.matchAll(/scope\.tools\.register\(\s*\{\s*name:\s*'([^']+)'/g)].map((m) => m[1]);
   if (!registered.length) fail('backend/lib/index.js 里找不到 scope.tools.register（插件工具注册被移走？对账逻辑要跟着改）');
   for (const name of registered) {

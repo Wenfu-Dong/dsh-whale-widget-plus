@@ -196,7 +196,10 @@ if (routes.includes('doubao-web') && !followsWeb) {
   fail('[音源清单] doubao-web 空音色没有走「跟随网页」分支（会退化成强制切某个音色）');
 } else if (routes.includes('doubao-web')) ok('doubao-web 空音色 = 跟随网页（不主动切音色）');
 
-const bridgeSrc = readAll(path.join(ROOT, 'src/bridge.js'));
+// 桥接侧源码：bridge.js + src/qq/**（功能组件已从 main() 拆出，接口接线可能落在组件里）。
+// 审计关心「这一层有没有接上」，不关心实现恰好放在哪个文件。
+const bridgeSrc = readAll(path.join(ROOT, 'src/bridge.js'))
+  + walk(path.join(ROOT, 'src/qq')).map((f) => readAll(f)).join('\n');
 const backendSrc = readAll(path.join(ROOT, 'backend/lib/index.js'));
 const statusWired = bridgeSrc.includes("'/api/voice/doubao-web/status'")
   && uiVoiceSrc.includes("'/voice/doubao-web/status'")

@@ -239,7 +239,10 @@ console.log('④ README 文档契约（这次的外部用户就是栽在没有�
 console.log('⑥ 「不采用、不改文件」，且拒绝要能被上层看到')
 check('抽出的 loader + 校验函数一次都没调用写接口', writeCalls.length === 0, JSON.stringify(writeCalls.slice(0, 4)))
 {
+  // 诊断数据组装已迁到 lib/about-panel.mjs（组件化迁移 #11），扫描源要跟着扩展，
+  // 否则「被忽略的原因」搬走后这条接线断言会误报。
   const host = fs.readFileSync(path.join(ROOT, HOST), 'utf8')
+    + '\n' + fs.readFileSync(path.join(ROOT, 'lib/about-panel.mjs'), 'utf8')
   // 接线断言（文本级）：路由与诊断行必须把被忽略的那份文件带出去 ——
   // 没有宿主进程就没法在沙箱里跑这条路由，所以这里只钉接线，行为由上面的读取断言覆盖。
   check('路由把被忽略的文件带出去（ignored: bubbleConfigIgnored）', /ignored:\s*bubbleConfigIgnored/.test(host))

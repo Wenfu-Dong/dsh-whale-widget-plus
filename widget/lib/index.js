@@ -10,6 +10,9 @@ import {
   preciseMoney, addMoney, sumMoney, beijingDay, dayOffset,
   observeBalance, balanceSummary, daySummary, accountingDays, reconcileBalance,
 } from './accounting.mjs'
+import { createRoleAudioStore } from './role-audio-store.mjs'
+import { createAboutPanel } from './about-panel.mjs'
+import { createUsageSettingsRoute, createApiModelsRoute } from './usage-api-routes.mjs'
 
 // Node 的 fetch(undici) 可能优先 IPv6：个别域名(如 open.bigmodel.cn)有 AAAA 记录但本机 IPv6 不通，
 // 会直接报 "fetch failed"（curl 会自动回退 IPv4，所以看起来正常）。统一改为 IPv4 优先。
@@ -3589,262 +3592,26 @@ export default {
     function readBody(req) { return readBodyLimit(req, 8192) }
     function readBodyMax(req, maxBytes) { return readBodyLimit(req, maxBytes) }
 
-    // —— 自定义角色存储：whale-roles/ 目录，每个角色一个 <id>.png + roles.json 索引 ——
-    function pickRoleDir() {
-      for (const p of ROLE_DIR_CANDIDATES) {
-        try {
-          fs.mkdirSync(p, { recursive: true })
-          fs.accessSync(p, fs.constants.W_OK)
-          return p
-        } catch (err) {}
-      }
-      return ROLE_DIR_CANDIDATES[0]
-    }
-
-    function defaultRolesIndex() {
-      return {
-        version: 1,
-        roles: [
-          // 默认小鲸鱼初始置顶；pinnedAt=1 作为基线，任何新置顶（Date.now()）都会排在它上面
-          { id: ROLE_DEFAULT_ID, name: '小鲸鱼', pinnedAt: 1, createdAt: 0 },
-        ],
-      }
-    }
-
-    function readRolesIndex() {
-      const dir = pickRoleDir()
-      try {
-        const parsed = JSON.parse(fs.readFileSync(path.join(dir, ROLE_INDEX_NAME), 'utf8'))
-        if (parsed && Array.isArray(parsed.roles)) {
-          if (!parsed.roles.some((r) => r && r.id === ROLE_DEFAULT_ID)) {
-            parsed.roles.unshift(defaultRolesIndex().roles[0])
-          }
-          return parsed
-        }
-      } catch (err) {}
-      return defaultRolesIndex()
-    }
-
-    function writeRolesIndex(index) {
-      const dir = pickRoleDir()
-      try {
-        fs.writeFileSync(path.join(dir, ROLE_INDEX_NAME), JSON.stringify(index, null, 2), 'utf8')
-        return true
-      } catch (err) {
-        return false
-      }
-    }
-
-    // 排序：置顶的在前（pinnedAt 大者先，即最新置顶在最上面），未置顶按创建时间倒序
-    function sortRoles(roles) {
-      return roles.slice().sort((a, b) => {
-        const ap = a.pinnedAt && a.pinnedAt > 0 ? a.pinnedAt : 0
-        const bp = b.pinnedAt && b.pinnedAt > 0 ? b.pinnedAt : 0
-        if (ap && bp) return bp - ap
-        if (ap) return -1
-        if (bp) return 1
-        return (b.createdAt || 0) - (a.createdAt || 0)
-      })
-    }
-
-    function rolesPayload() {
-      const index = readRolesIndex()
-      return {
-        ok: true,
-        roles: sortRoles(index.roles).map((r) => ({
-          id: r.id,
-          name: String(r.name || r.id),
-          url: r.id === ROLE_DEFAULT_ID ? '/dsh-whale/image.png' : '/dsh-whale/role-image.png?id=' + encodeURIComponent(r.id),
-          pinned: !!(r.pinnedAt && r.pinnedAt > 0),
-          pinnedAt: r.pinnedAt || null,
-          createdAt: r.createdAt || null,
-          // format: 'png' | 'gif' | 'apng'（旧角色无 format 字段 → png）
-          format: r.format === 'gif' || r.format === 'apng' ? r.format : 'png',
-        })),
-      }
-    }
-
-    // 角色文件按格式映射扩展名：gif→.gif，apng/png→.png（APNG 文件仍是 PNG 容器）
-    function roleFileExt(format) {
-      return format === 'gif' ? 'gif' : 'png'
-    }
-
-    function roleFilePath(id, format) {
-      if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(id) || id === ROLE_DEFAULT_ID) return null
-      return path.join(pickRoleDir(), id + '.' + roleFileExt(format))
-    }
-
-    function roleImagePath(id) {
-      // 查找角色元数据确定扩展名；找不到默认 png
-      const { role } = roleIndexFind(id)
-      const format = role && (role.format === 'gif' || role.format === 'apng') ? role.format : 'png'
-      const p = roleFilePath(id, format)
-      return p
-    }
-
-    function roleIdFromUrl(url) {
-      try {
-        const q = String(url || '').split('?')[1] || ''
-        const m = /(?:^|&)id=([^&]+)/.exec(q)
-        return m ? decodeURIComponent(m[1]) : ''
-      } catch (err) { return '' }
-    }
-
-    function roleIndexFind(id) {
-      const index = readRolesIndex()
-      const role = index.roles.find((r) => r && r.id === id)
-      return { index, role }
-    }
-
-    // —— 自定义音频：whale-audio/ 目录，片段 <id>.wav + audio.json 索引 ——
-    function pickAudioDir() {
-      for (const p of AUDIO_DIR_CANDIDATES) {
-        try {
-          fs.mkdirSync(p, { recursive: true })
-          fs.accessSync(p, fs.constants.W_OK)
-          return p
-        } catch (err) {}
-      }
-      return AUDIO_DIR_CANDIDATES[0]
-    }
-
-    function defaultAudioIndex() {
-      return { version: 1, groups: [], fragments: [] }
-    }
-
-    function readAudioIndex() {
-      const dir = pickAudioDir()
-      try {
-        const parsed = JSON.parse(fs.readFileSync(path.join(dir, AUDIO_INDEX_NAME), 'utf8'))
-        if (parsed && Array.isArray(parsed.groups) && Array.isArray(parsed.fragments)) {
-          return parsed
-        }
-      } catch (err) {}
-      return defaultAudioIndex()
-    }
-
-    function writeAudioIndex(index) {
-      const dir = pickAudioDir()
-      try {
-        fs.writeFileSync(path.join(dir, AUDIO_INDEX_NAME), JSON.stringify(index, null, 2), 'utf8')
-        return true
-      } catch (err) {
-        return false
-      }
-    }
-
-    // 自定义片段 id -> 文件路径；预设片段无文件
-    function audioFragmentPath(id) {
-      if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) return null
-      if (PRESET_FRAGMENTS[id]) return null
-      return path.join(pickAudioDir(), id + '.wav')
-    }
-
-    function audioIdFromUrl(url) {
-      try {
-        const q = String(url || '').split('?')[1] || ''
-        const m = /(?:^|&)id=([^&]+)/.exec(q)
-        return m ? decodeURIComponent(m[1]) : ''
-      } catch (err) { return '' }
-    }
-
-    // 片段列表：预设片段 + 用户自定义片段
-    function audioFragmentsPayload() {
-      const index = readAudioIndex()
-      const presets = Object.keys(PRESET_FRAGMENTS).map((k) => ({
-        id: k,
-        name: PRESET_FRAGMENTS[k].name,
-        preset: true,
-      }))
-      const custom = index.fragments.map((f) => ({
-        id: f.id,
-        name: String(f.name || f.id),
-        preset: false,
-        createdAt: f.createdAt || null,
-      }))
-      return presets.concat(custom)
-    }
-
-    // 音效组列表：预设组 + 用户自定义组（置顶优先，组内按创建时间倒序）
-    function audioGroupsPayload() {
-      const index = readAudioIndex()
-      // 排序：置顶的自定义组最前，其次预设组，最后未置顶的自定义组（按创建时间倒序）
-      const customs = index.groups.slice().map((g) => ({
-        id: g.id,
-        name: String(g.name || g.id),
-        press: typeof g.press === 'string' ? g.press : null,
-        release: typeof g.release === 'string' ? g.release : null,
-        preset: false,
-        pinned: !!(g.pinnedAt && g.pinnedAt > 0),
-        pinnedAt: g.pinnedAt || null,
-        createdAt: g.createdAt || 0,
-      }))
-      const pinned = customs.filter((g) => g.pinned).sort((a, b) => b.pinnedAt - a.pinnedAt)
-      const unpinned = customs.filter((g) => !g.pinned).sort((a, b) => b.createdAt - a.createdAt)
-      const presets = Object.keys(PRESET_GROUPS).map((k) => {
-        const g = PRESET_GROUPS[k]
-        return { id: g.id, name: g.name, press: g.press, release: g.release, preset: true, pinned: false, pinnedAt: null, createdAt: 0 }
-      })
-      return pinned.concat(presets, unpinned)
-    }
-
-    function audioPayload() {
-      return {
-        ok: true,
-        groups: audioGroupsPayload(),
-        fragments: audioFragmentsPayload(),
-      }
-    }
-
-    // 取片段音频字节：内置随包片段 → 预设(SOUND_SETS) → 自定义 whale-audio/<id>.wav
-    function loadAudioFragmentBytes(fragId) {
-      if (BUILTIN_FRAGMENT_FILES[fragId]) {
-        return loadSound(BUILTIN_FRAGMENT_FILES[fragId])
-      }
-      if (PRESET_FRAGMENTS[fragId]) {
-        // 预设片段映射到对应音效文件：ya1->duck.press, ya2->duck.release, d1->fx1.press, d2->fx1.release
-        const map = { ya1: ['duck', 'press'], ya2: ['duck', 'release'], d1: ['fx1', 'press'], d2: ['fx1', 'release'], ya3: ['duck2', 'press'], vb: ['voice_bing', 'press'], vh: ['voice_heng', 'press'], vq: ['voice_qtan', 'press'], vw: ['voice_weiqu', 'press'] }
-        const [setName, slot] = map[fragId]
-        const set = SOUND_SETS[setName]
-        if (!set) return null
-        return loadSound(set[slot])
-      }
-      const p = audioFragmentPath(fragId)
-      if (!p) return null
-      try {
-        const bytes = fs.readFileSync(p)
-        if (bytes && bytes.length > 0) return bytes
-      } catch (err) {}
-      return null
-    }
-
-    // 组内实际使用的片段：若自定义组引用的片段被删，回退到预设
-    // 返回 '' 表示该槽显式留空（该事件静音），调用方应据此不发音频
-    function groupFragmentId(groupId, slot) {
-      const custom = readAudioIndex().groups.find((g) => g && g.id === groupId)
-      if (custom) {
-        const fid = custom[slot]
-        if (fid === '') return ''
-        if (fid) {
-          if (PRESET_FRAGMENTS[fid]) return fid
-          if (customFragExists(fid)) return fid
-        }
-        // 无字段/引用失效 → 回退预设：新组无引用时用 duck
-        return slot === 'press' ? PRESET_GROUPS.duck.press : PRESET_GROUPS.duck.release
-      }
-      const preset = PRESET_GROUPS[groupId]
-      if (preset) return preset[slot]
-      return slot === 'press' ? PRESET_GROUPS.duck.press : PRESET_GROUPS.duck.release
-    }
-
-    function customFragExists(id) {
-      try {
-        const p = audioFragmentPath(id)
-        if (!p) return false
-        const st = fs.statSync(p)
-        return st.isFile()
-      } catch (err) { return false }
-    }
+    // —— 自定义角色 / 音频存储：实现见 role-audio-store.mjs（目录候选与内置素材表由这里注入）——
+    const roleAudioStore = createRoleAudioStore({
+      roleDirCandidates: ROLE_DIR_CANDIDATES,
+      audioDirCandidates: AUDIO_DIR_CANDIDATES,
+      roleDefaultId: ROLE_DEFAULT_ID,
+      roleIndexName: ROLE_INDEX_NAME,
+      audioIndexName: AUDIO_INDEX_NAME,
+      presetGroups: PRESET_GROUPS,
+      presetFragments: PRESET_FRAGMENTS,
+      builtinFragmentFiles: BUILTIN_FRAGMENT_FILES,
+      soundSets: SOUND_SETS,
+      loadSound,
+    })
+    const {
+      pickRoleDir, readRolesIndex, writeRolesIndex, sortRoles, rolesPayload,
+      roleFileExt, roleFilePath, roleImagePath, roleIdFromUrl, roleIndexFind,
+      readAudioIndex, writeAudioIndex, audioFragmentPath, audioIdFromUrl,
+      audioFragmentsPayload, audioGroupsPayload, audioPayload,
+      loadAudioFragmentBytes, groupFragmentId, customFragExists,
+    } = roleAudioStore
 
     disposers.push(registerRoute({
       kind: 'exact',
@@ -4236,158 +4003,18 @@ export default {
     // ===== v793（用户要求）：点版号 → 「关于 / 自检」面板 =====
     // 数据来源全部是宿主已有状态；路径一律脱敏；**点开才请求，不轮询**。
     let balanceLast = null // { at, ok, code, error, ms, hasBalance, keyRef, keyConfigured }
-    function aboutPayload(req) {
-      const client = clientKindOf(req)
-      const hostFile = (() => { try { return fileURLToPath(import.meta.url) } catch (err) { return '' } })()
-      const widgetFile = (() => {
-        for (const p of WIDGET_FILE_CANDIDATES) { try { if (fs.existsSync(p)) return p } catch (err) {} }
-        return ''
-      })()
-      const dataFiles = [
-        ['账本（记账）', USAGE_FILE_CANDIDATES],
-        ['模型注册表', API_FILE_CANDIDATES],
-        ['泡泡配置', BUBBLE_FILE_CANDIDATES, bubbleConfigIgnored ? ('被忽略：' + bubbleConfigIgnored.reason) : ''],
-        ['外观/设置', SIZE_FILE_CANDIDATES],
-        ['轮次序号', TURN_FILE_CANDIDATES],
-        ['Codex 缓存', [path.join(DSH_HOME, '.dshw-codex.json')]],
-      ].map(([label, list, note]) => {
-        const p = firstExisting(list)
-        const f = p ? fileFacts(p) : null
-        return {
-          label: label,
-          found: !!p,
-          path: p ? maskPath(p) : '',
-          candidates: (list || []).length,
-          bytes: f ? f.bytes : null,
-          mtime: f ? f.mtime : null,
-          note: note || '',
-        }
-      })
-      // 记账概览（只给统计，不给明细）
-      let ledger = null
-      try {
-        const led = readUsageLedger()
-        const today = todayKey()
-        const sum = daySummary(led, today)
-        let days = 0
-        try { days = accountingDays(led).length } catch (err) { days = Object.keys(led.history || {}).length }
-        ledger = {
-          days: days,
-          todayPartial: !!(sum && sum.partialDay),
-          todaySource: (sum && sum.source) || '',
-          lastObservedAt: (sum && sum.lastObservedAt) || null,
-          needsReview: !!(sum && sum.needsReview),
-        }
-      } catch (err) { ledger = { error: String((err && err.message) || err).slice(0, 120) } }
-      // Codex（v792 起：没配就完全禁用）
-      let codex = { enabled: false, reason: '' }
-      try {
-        codex = {
-          enabled: codexStatsOn(),
-          reason: codexStatsOn() ? '' : codexDisabledReason(),
-          snapAt: codexSnapAt || null,
-          ok: !!(codexSnap && codexSnap.ok),
-          files: (codexSnap && codexSnap.sessions) != null ? codexSnap.sessions : null,
-          skipped: (codexSnap && codexSnap.skipped) != null ? codexSnap.skipped : null,
-          deferred: (codexSnap && codexSnap.deferred) != null ? codexSnap.deferred : null,
-        }
-      } catch (err) {}
-      return {
-        ok: true,
-        plugin: {
-          name: 'dsh-dfy',
-          version: BUILD_VERSION,
-          channel: BUILD_CHANNEL,
-          label: VERSION_LABEL,
-          // 「版本自洽」的对照值：**实时**读一次 package.json。
-          // BUILD_VERSION 是进程启动时读的；改了 package.json 却没重启 ⇒ 两者不同，
-          // 自检会显示"不一致（重启后生效）"，这正是用户最容易踩的坑。
-          packageVersion: (() => {
-            try { return String(JSON.parse(fs.readFileSync(path.join(PACKAGE_ROOT, '..', 'package.json'), 'utf8')).version || '') } catch (err) { return '' }
-          })(),
-        },
-        build: {
-          // v796：`found` 必须给（v795 前端简化后靠它判断"未找到"，缺了就会把宿主/前端文件误显示成"未找到"）
-          host: { found: !!hostFile, path: maskPath(hostFile), bytes: fileFacts(hostFile) ? fileFacts(hostFile).bytes : null, mtime: fileFacts(hostFile) ? fileFacts(hostFile).mtime : null },
-          widget: { found: !!widgetFile, path: maskPath(widgetFile), bytes: fileFacts(widgetFile) ? fileFacts(widgetFile).bytes : null, mtime: fileFacts(widgetFile) ? fileFacts(widgetFile).mtime : null },
-          // v819（自检发现）：这里原来写的是 `indexOf('<开发机目录名>')` —— 检测"开发版路径"的代码自己带了
-          //   那个字面量 ⇒ 发布包被 `tools/ci-audit.mjs` 判为"含开发机路径"（自己成了自己要检测的东西）。
-          //   改成**结构性判定**：宿主源码里有没有写死的绝对盘符路径（'D:/…' / "C:\\…"）。
-          //   开发版有 15+ 处（assets 兜底路径），strip 后的发布副本 0 处 ⇒ 判定更准，也不再出现那个字面量。
-          hostHasDevPaths: (() => {
-            try {
-              const src = fs.readFileSync(hostFile, 'utf8')
-              return /["'][A-Za-z]:[\\/]/.test(src)
-            } catch (err) { return null }
-          })(),
-        },
-        runtime: {
-          platform: process.platform,
-          arch: process.arch,
-          node: process.version,
-          dsh: dshVersionOf(),
-          uptimeSec: Math.round(process.uptime()),
-          dataHome: maskPath(DSH_HOME),
-          // profile 名（`profiles/web`、`profiles/desktop`…）：用来一眼看出"这份是哪个 profile 起来"的
-          profile: (() => { try { const m = /profiles[\\/]([^\\/]+)/.exec(hostFile); return m ? m[1] : '' } catch (err) { return '' } })(),
-        },
-        client: client,
-        data: dataFiles,
-        ledger: ledger,
-        balance: balanceLast,
-        codex: codex,
-      }
-    }
-    // v0.6.6：不再为版本自洽扫描整份宿主源码（每次自检读 295KB 只为匹配两个旧字面量）。
-    // 现在由插件实时读取 package.json 的 version 与运行中版本对照，缺值时前端显示「未知」。
-    // v796：DSH 版本**真的去读**，而不是只看环境变量（用户反馈"DSH 版本读取不到 (?)"）。
-    //   顺序：① 环境变量（部分启动方式会带）② 从 argv/execPath 往上找 `@deepseek-ai/dsh` 的 package.json
-    //   （npx 启动时 argv 就在 `_npx/<hash>/node_modules/@deepseek-ai/dsh/...` 里）③ 读不到就老实回 'unknown'。
-    //   全程 try/catch + 缓存（每个目录最多往上 8 层），绝不抛错。
-    let dshVersionCache = null
-    function dshVersionOf() {
-      if (dshVersionCache !== null) return dshVersionCache
-      let v = ''
-      try { v = String(process.env.DSH_CLIENT_VERSION || process.env.DSH_VERSION || '') } catch (err) {}
-      if (!v) {
-        try {
-          const roots = [process.argv[1], process.argv[0], process.execPath]
-          for (const r of roots) {
-            if (!r) continue
-            let dir = path.dirname(String(r))
-            for (let up = 0; up < 8; up++) {
-              try {
-                const pj = path.join(dir, 'package.json')
-                if (fs.existsSync(pj)) {
-                  const j = JSON.parse(fs.readFileSync(pj, 'utf8'))
-                  const nm = String((j && j.name) || '')
-                  if (nm === '@deepseek-ai/dsh' || nm === 'dsh' || nm === 'dsh-cli') {
-                    v = String((j && j.version) || '')
-                    if (v) break
-                  }
-                }
-              } catch (err) {}
-              const parent = path.dirname(dir)
-              if (parent === dir) break
-              dir = parent
-            }
-            if (v) break
-          }
-        } catch (err) {}
-      }
-      dshVersionCache = v || 'unknown'
-      return dshVersionCache
-    }
-    // v795（用户反馈）：客户端类型**看请求头的 UA**。前端用 `navigator.windowControlsOverlay` 判会误判 ——
-    //   Chrome 桌面浏览器也有这个 API，于是 `npx @deepseek-ai/dsh web` 起来也被认成"官方桌面客户端"。
-    //   官方桌面客户端是 Electron ⇒ UA 里必有 `Electron/`。判定只回 kind（不回完整 UA，避免带出多余指纹）。
-    function clientKindOf(req) {
-      try {
-        const ua = String((req && req.headers && (req.headers['user-agent'] || req.headers['User-Agent'])) || '')
-        const electron = /electron/i.test(ua)
-        return { kind: electron ? 'desktop' : 'web', via: electron ? 'ua-electron' : 'ua-browser' }
-      } catch (err) { return { kind: 'unknown', via: 'error' } }
-    }
+    const { aboutPayload } = createAboutPanel({
+      BUILD_VERSION, BUILD_CHANNEL, VERSION_LABEL, PACKAGE_ROOT, DSH_HOME,
+      hostFile: (() => { try { return fileURLToPath(import.meta.url) } catch (err) { return '' } })(),
+      WIDGET_FILE_CANDIDATES, USAGE_FILE_CANDIDATES, API_FILE_CANDIDATES,
+      BUBBLE_FILE_CANDIDATES, SIZE_FILE_CANDIDATES, TURN_FILE_CANDIDATES,
+      firstExisting, fileFacts, maskPath,
+      readUsageLedger, todayKey, daySummary, accountingDays,
+      codexStatsOn, codexDisabledReason,
+      getCodexSnap: () => codexSnap, getCodexSnapAt: () => codexSnapAt,
+      getBubbleConfigIgnored: () => bubbleConfigIgnored,
+      getBalanceLast: () => balanceLast,
+    })
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/about.json',
@@ -5080,25 +4707,7 @@ export default {
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/usage-settings.json',
-      handler: async (req, res) => {
-        try {
-          if (req.method === 'PUT' || req.method === 'POST') {
-            // v882：4 类提示的自定义泡泡内容（多模块文案）合起来可能超过 8KB，抬到 64KB（仍有界）
-            const body = await readBodyMax(req, 64 * 1024)
-            const parsed = JSON.parse(body || '{}')
-            if (!parsed || typeof parsed !== 'object') throw new Error('bad body')
-            const result = writeUsageSettings(parsed)
-            res.writeHead(result.ok ? 200 : 400, JSON_HEADERS)
-            res.end(JSON.stringify(result))
-            return
-          }
-          res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: true, settings: readUsageSettings() }))
-        } catch (err) {
-          res.writeHead(400, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err) }))
-        }
-      },
+      handler: createUsageSettingsRoute({ readBodyMax, writeUsageSettings, readUsageSettings, JSON_HEADERS }),
     }))
 
     // 自定义 API 模型：GET 列表（含实时余额/今日已用/各模型提醒预算）
@@ -5106,72 +4715,10 @@ export default {
     disposers.push(registerRoute({
       kind: 'exact',
       path: '/dsh-whale/api-models.json',
-      handler: async (req, res) => {
-        try {
-          if (req.method === 'PUT' || req.method === 'POST') {
-            // v882：8KB 对"余额接口 body(4000) + auth(1000) + 若干 url"这种完整模型条目偏小，
-            //   合法保存会被判成请求体过大。抬到 64KB（仍有界），与 qq-sync 的上限一致。
-            const body = await readBodyMax(req, 64 * 1024)
-            const parsed = JSON.parse(body || '{}')
-            const action = String((parsed && parsed.action) || 'save')
-            if (action === 'delete') {
-              const r = apiDeleteModel(parsed.id)
-              const list = await apiModelsPayload()
-              res.writeHead(r.ok ? 200 : 400, JSON_HEADERS)
-              res.end(JSON.stringify({ ...r, models: list.models }))
-              return
-            }
-            if (action === 'probe') {
-              // 只做只读连通性测试（如方舟 /api/v3/models），不消耗 token
-              const m0 = apiModelById(parsed.id)
-              const pr = await apiProbeModel(m0)
-              res.writeHead(200, JSON_HEADERS)
-              res.end(JSON.stringify(pr))
-              return
-            }
-            if (action === 'set-key' || action === 'delete-key') {
-              const ref = String(parsed.keyRef || '').trim()
-              if (!ref) throw new Error('bad keyRef')
-              // v882（审查发现，安全一致性）：apiSaveModel 早就有凭据名白名单，这里却接受任意字符串 ⇒
-              //   可借 set-key/delete-key 往**任意凭据名**上写/删（例如别的插件在用的 ref）。
-              //   与 apiSaveModel 用同一条规则：字母/数字/下划线，≤64。
-              if (!/^[A-Za-z0-9_]{1,64}$/.test(ref)) throw new Error('凭据名只能包含字母、数字与下划线（≤64 字符）')
-              const svc = ctx.credentials
-              if (action === 'set-key') {
-                await svc.set(ref, String(parsed.keyValue || ''))
-              } else if (typeof svc.unset === 'function') {
-                // 普通密钥存在凭据文档的 refs 段：必须用 unset 才能真正删除
-                // （deleteRecord 只处理 records 段的结构化记录，对 refs 会静默返回）
-                await svc.unset(ref)
-              } else {
-                await svc.deleteRecord(ref)
-              }
-              res.writeHead(200, JSON_HEADERS)
-              res.end(JSON.stringify({ ok: true }))
-              return
-            }
-            if (action === 'model-settings') {
-              const r = writeUsageSettings({ modelSettings: { id: String(parsed.id || ''), alert: parsed.alert, budget: parsed.budget, quota: parsed.quota } })
-              res.writeHead(r.ok ? 200 : 400, JSON_HEADERS)
-              res.end(JSON.stringify(r))
-              return
-            }
-            // 注意：keyValue 在提交体上（不在 model 里），必须合并进去，
-            // 否则前端面板里填的 API key 会被丢弃（密钥永远存不进去）
-            const r = await apiSaveModel({ ...(parsed.model || parsed), keyValue: parsed.keyValue })
-            const list2 = await apiModelsPayload()
-            res.writeHead(r.ok ? 200 : 400, JSON_HEADERS)
-            res.end(JSON.stringify({ ...r, models: list2.models }))
-            return
-          }
-          const payload = await apiModelsPayload()
-          res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify(payload))
-        } catch (err) {
-          res.writeHead(400, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err).slice(0, 200) }))
-        }
-      },
+      handler: createApiModelsRoute({
+        readBodyMax, apiDeleteModel, apiModelsPayload, apiModelById, apiProbeModel,
+        getCtx: () => ctx, writeUsageSettings, apiSaveModel, JSON_HEADERS,
+      }),
     }))
 
     disposers.push(registerRoute({
