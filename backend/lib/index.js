@@ -5520,7 +5520,11 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ${writeOut('$
     bridgeHealthBusy = true;
     try {
       if (readQqRuntimeMode() === 'builtin') {
-        // 内置版：AstrBot 不参与 QQ，只看管内置桥有没有挂着
+        // 内置版：AstrBot 不参与 QQ，只看管内置桥有没有挂着。
+        // 必须先看「随插件自动启动 QQ」开关：用户明确关掉（或 handleConfig 刚把桥停掉）
+        // 后，这条 2 分钟巡检不能把它偷偷拉起来 —— 否则开关变成摆设、QQ 永远关不干净。
+        // （2026-11-17 体检：只有另一条自愈路径 maybeAutoStartBridge 有这个判断，这里漏了。）
+        if (!platformStartEnabled('qq')) return;
         try {
           const builtinStatus = await bridgeStatus();
           if (!builtinStatus.running) await startBridge({ dshWebUrl: currentDshUrl() });

@@ -10,6 +10,7 @@ import os from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import util from 'node:util';
 import { execFileSync } from 'node:child_process';
 import yaml from 'js-yaml';
 import { extractPresetPrefix, presetPromptBlockers, presetPromptWarnings, renderPresetPromptYaml } from './preset-prompt.js';
@@ -16777,6 +16778,12 @@ async function main(options = {}) {
   }
 
   /** 处理一条会话事件；返回 true 表示本回合已停止，调用方应跳过后续处理。 */
+  // 回合级止血幂等：turn-guard 自己的 state.stopped 只能挡住「同一份 state」的重复
+  // stop，但 DSH 事件流在重连/flush 时可能重放 turn/start —— begin() 会重建 state
+  // （stopped=false、错误计数清零），同一毫秒内能把同一次停轮记成 3 条 L3
+  // （2026-11-08 13:24:06 实测：session-16a4ac25 三条同因记录，间隔 2~3ms）。
+  // 这里按回合（turn/end 清除）再挡一层，保证一次停轮只记一条闸门事件。
+  const turnStopNotified = new Set();
   function guardTurnEvent(sessionId, key, event) {
     if (!sessionId || !key) return false;
     const type = event?.type;
@@ -16786,6 +16793,7 @@ async function main(options = {}) {
     }
     if (type === 'turn/end') {
       turnGuard.end(sessionId);
+      turnStopNotified.delete(sessionId);
       return false;
     }
 
@@ -16810,7 +16818,10 @@ async function main(options = {}) {
       if (hits.length) stop = turnGuard.noteBudgetExhausted(sessionId, hits);
     }
     if (stop) {
-      recordTurnStop(sessionId, key, stop);
+      if (!turnStopNotified.has(sessionId)) {
+        turnStopNotified.add(sessionId);
+        recordTurnStop(sessionId, key, stop);
+      }
       return true;
     }
     return false;
@@ -17400,6 +17411,7 @@ async function main(options = {}) {
         sendToolSucceededSessions.clear();
         pendingSendToolCalls.clear();
         v2TurnStartAt.clear();
+        turnStopNotified.clear(); // 事件流已断，回合级止血幂等表一并清（新流按新回合重记）
         toolCallNames.clear();
         pendingWakeKeys.clear();
         clearAllPendingWakeLeases();
@@ -17694,8 +17706,19 @@ async function main(options = {}) {
     // SDK 在 WS 升级被拒（401 / 建连失败）时可能**只 emit error、不 emit close**，
     // 于是挂在 close 上的 token 自愈永远不会触发 —— 表现为「桥接活着但收发全废」，
     // 用户只能靠手工改 token 绕过去（issue #19）。这里同样尝试一次（内部有 10s 节流）。
+    // 详情提取不能只用 JSON.stringify：Error 对象序列化恒为 `{}`（message 是不可枚举
+    // 属性），日志里就只剩一句「SnowLuma 错误：{}」，排障时等于没有日志（2026-11-16
+    // 每次桥接启动都刷一条）。cause（Node 16.9+ 的 Error.cause）也要翻出来。
     const detail = error && typeof error === 'object'
-      ? [error.code, error.message, error.reason, error.type].filter(Boolean).join(' | ') || JSON.stringify(error)
+      ? [
+        error.code,
+        error.message,
+        error.reason,
+        error.type,
+        error.cause?.message ?? error.cause?.code,
+      ].filter(Boolean).join(' | ')
+        || (error instanceof Error ? (error.stack ?? '').split(/\r?\n/).slice(0, 2).join(' | ') : '')
+        || util.inspect(error, { depth: 2, breakLength: 200, maxStringLength: 160 })
       : String(error ?? '');
     log(`SnowLuma 错误：${detail || '(无详情)'}`);
     void healTokenIfStale(`error ${detail}`.trim().slice(0, 200));
@@ -17943,6 +17966,12 @@ export async function startEmbedded({ dshWebUrl = '' } = {}) {
     if (embeddedRuntime?.error) return { ok: false, error: embeddedRuntime.error };
     return { ok: true, already: true, port: embeddedRuntime?.port ?? null };
   }
+  // 先占住位再做事：下面有 `await previousInstance.stop()` 这样的让出点，若把
+  // `embeddedStarted = true` 放到它们之后，两个并发 startEmbedded（插件激活时
+  // maybeAutoStartBridge 与 ensureBridgePluginHealth 同帧调进来）会都通过上面的
+  // 检查、各自 main() 一遍 —— 两条事件流并行消费同一条 DSH 流。
+  embeddedStarted = true;
+  embeddedStartupError = '';
   // 嵌入模式**不能**装 installProcessGuards（那些钩子会 process.exit，等于把 DSH 带走），
   // 但「退出前把合并写刷盘」是纯同步写入、不退出进程，必须装：否则 DSH 被关掉时
   // saveSocialV2State 的 300ms 合并窗口里可能还有未落盘的入站缓冲/唤醒计数。
@@ -17953,6 +17982,7 @@ export async function startEmbedded({ dshWebUrl = '' } = {}) {
   }
   // 已有独立 bridge 占着端口：绝不能再连一次 SnowLuma，否则同一条 QQ 消息会处理两遍。
   if (consolePortInUse()) {
+    embeddedStarted = false;
     return { ok: false, error: '端口 3100 已被占用（已有独立 bridge 在运行）；请先停掉它再让 DSH 接管' };
   }
   if (dshWebUrl) process.env.DSH_WEB_URL = String(dshWebUrl);
@@ -17962,8 +17992,6 @@ export async function startEmbedded({ dshWebUrl = '' } = {}) {
   if (previousInstance && typeof previousInstance.stop === 'function') {
     try { await previousInstance.stop(); } catch {}
   }
-  embeddedStarted = true;
-  embeddedStartupError = '';
   main({ embed: true }).catch((error) => {
     embeddedStartupError = String(error?.message ?? error);
     embeddedStarted = false;

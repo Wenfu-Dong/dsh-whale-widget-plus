@@ -208,7 +208,20 @@ function embeddedSourceKey() {
   }
 }
 
-export async function start({ dshWebUrl = '' } = {}) {
+export function start({ dshWebUrl = '' } = {}) {
+  // 插件激活路径有两条入口（apply 末尾的 maybeAutoStartBridge + 每 2 分钟的
+  // ensureBridgePluginHealth / bridgeRepairTimer），DSH 重启瞬间它们会几乎同时调进来。
+  // 以前没有互斥：两个调用都在端口监听前通过了 portOpen() 检查，各自走一遍
+  // startEmbedded —— 第二次靠 embeddedStarted 兜底返回 already，但 supervisor 日志
+  // 依然打两行「已在本进程内启动内嵌桥接」（2~3 秒各一条），排障时看着像起了两个实例。
+  // 这里把并发调用串成一条链：后到的等先到的启动完，自然命中 already 分支。
+  const run = startChain.then(() => doStart({ dshWebUrl }));
+  startChain = run.catch(() => {});
+  return run;
+}
+
+let startChain = Promise.resolve();
+async function doStart({ dshWebUrl = '' } = {}) {
   if (await portOpen()) {
     // 端口已在（通常是本进程的内嵌桥）。以前这里直接 return already：
     // 源码（src/bridge.js）改了、但内嵌实例还占着端口时，跑的还是旧模块 ——
@@ -228,6 +241,12 @@ export async function start({ dshWebUrl = '' } = {}) {
     const mod = await loadEmbedded();
     const result = await mod.startEmbedded({ dshWebUrl });
     if (!result.ok) return result;
+    // already（并发调用撞上刚启动的实例）不算一次新启动，日志要分开写，
+    // 否则每次 DSH 重启 supervisor 日志都出现两行「已启动」，看不出真伪。
+    if (result.already) {
+      appendSupervisorLog(`内嵌桥接已在运行（并发启动被幂等吸收，端口 ${result.port ?? '?'}）`);
+      return { ok: true, already: true, port: result.port ?? null, message: '桥接已经在跑' };
+    }
     appendSupervisorLog(`已在本进程内启动内嵌桥接（DSH=${dshWebUrl || 'config'}，端口 ${result.port ?? '?'}）`);
     return {
       ok: true,

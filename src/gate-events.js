@@ -112,6 +112,32 @@ export function createGateEventStore({ dir, log = () => {}, maxBytes = 2 * 1024 
    */
   const DEDUPE_MAX_KEYS = 500;
   const dedupeSeen = new Map(); // dedupeKey -> { at, record }
+  // 「同一件事未确认期间不重复弹」的持久化去重：内存 60s 窗口只覆盖单次进程内的高频刷屏，
+  // 但 DSH 网页版插件生命周期随浏览器会话启停 —— 每次重载桥接都是新进程、新 Map，
+  // SnowLuma 没开时每次重启都会在 ~2 分钟宽限后**再记一条** send-channel-down（用户侧
+  // 表现为故障提醒一个接一个弹，2026-11-16 一天 7 条同因记录）。这里对「故障且已拦截」
+  // 类事件加一层落盘判重：同 dedupeKey 的未确认记录在 24h 内存在时，不追加新行。
+  // 恢复类事件（send-channel-restored 等 action=allowed）不受影响，照常记录；
+  // 用户点「确认」后同一故障复发也会重新记录（不会把新故障顶掉）。
+  const PERSISTED_DEDUPE_MS = 24 * 3600_000;
+
+  function findUnackedSameKey(dedupeKey, nowMs) {
+    if (!dedupeKey) return null;
+    let raw = '';
+    try { raw = fs.readFileSync(file, 'utf8'); } catch { return null; }
+    const lines = raw.split(/\r?\n/).filter(Boolean).slice(-1000);
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      try {
+        const row = JSON.parse(lines[i]);
+        if (row?.dedupeKey !== dedupeKey) continue;
+        if (Date.parse(row.at || '') < nowMs - PERSISTED_DEDUPE_MS) return null; // 太旧：按真复发处理
+        const acks = readAcks();
+        if (acks.has(row.id) || row.ack === true) return null; // 已确认过：允许重新记录
+        return row;
+      } catch { /* 坏行跳过 */ }
+    }
+    return null;
+  }
 
   function rotateIfNeeded() {
     try {
@@ -147,6 +173,15 @@ export function createGateEventStore({ dir, log = () => {}, maxBytes = 2 * 1024 
       ack: false,
     };
     const window = Number.isFinite(Number(dedupeWindowMs)) && Number(dedupeWindowMs) > 0 ? Number(dedupeWindowMs) : 0;
+    // 持久化判重（只拦「故障且已拦截」类；同 key 未确认且未超 24h → 不追加新行）。
+    if (stored.dedupeKey && stored.kind === 'fault' && stored.action === 'blocked') {
+      const existing = findUnackedSameKey(stored.dedupeKey, stamp);
+      if (existing) {
+        // 内存窗口同步压住（本次进程内再刷同一件事也不会写盘）
+        dedupeSeen.set(stored.dedupeKey, { at: stamp, record: existing });
+        return existing;
+      }
+    }
     if (stored.dedupeKey && window > 0) {
       const prev = dedupeSeen.get(stored.dedupeKey);
       if (prev && stamp - prev.at < window) {
