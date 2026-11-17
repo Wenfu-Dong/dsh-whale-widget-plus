@@ -1960,8 +1960,10 @@ async function main(options = {}) {
    * 只在 reserved2 + DSH 就绪后调用（open 时 currentMode 还是 chat，会被模式守卫吞掉）。
    */
   function wakeBacklogConversations(trigger = 'boot') {
+    if (shuttingDown) return;
     if (currentMode !== 'reserved2' || cfg.socialV2?.enabled === false) return;
     const timer = setTimeout(() => {
+      if (shuttingDown) return;
       try {
         const all = pickBacklogSessions(socialV2.conversations.entries(), {
           isAllowed: (key) => isSessionAllowedInCurrentMode(key),
@@ -5460,8 +5462,8 @@ async function main(options = {}) {
       trimRunFile(ACTIVITY_LOG, ACTIVITY_KEEP_LINES);
     } catch { /* 同上 */ }
   }
-  setTimeout(() => { try { trimRunLogs(); } catch {} }, 20_000).unref?.();
-  const runLogTrimTimer = setInterval(() => { try { trimRunLogs(); } catch {} }, 6 * 3600_000);
+  setTimeout(() => { if (!shuttingDown) { try { trimRunLogs(); } catch {} } }, 20_000).unref?.();
+  const runLogTrimTimer = setInterval(() => { if (!shuttingDown) { try { trimRunLogs(); } catch {} } }, 6 * 3600_000);
   runLogTrimTimer.unref?.();
 
   /** 她真的往主人私聊发了消息（所有发送端点最终都会记到这里）。 */
@@ -5808,9 +5810,11 @@ async function main(options = {}) {
   }
 
   function scheduleSocialReply(key, promptText, minDelay, maxDelay, label, farewell = false, media = null, extra = {}) {
+    if (shuttingDown) return;
     const delay = randInt(minDelay, maxDelay);
     log(`社交模式：${label} ${key}，延迟 ${Math.round(delay / 1000)}s 后投递`);
     const timer = setTimeout(() => {
+      if (shuttingDown) return;
       const timers = social.pendingTimers.get(key);
       if (timers) {
         timers.delete(timer);
@@ -9069,6 +9073,7 @@ async function main(options = {}) {
   }
 
   async function registerPending(key, entry) {
+    if (shuttingDown) return entry;
     const existing = pending.get(key);
     if (existing) {
       clearTimeout(existing.timer);
@@ -9077,6 +9082,7 @@ async function main(options = {}) {
       cancelPendingEntry(existing).catch(() => {});
     }
     const timer = setTimeout(() => {
+      if (shuttingDown) return;
       if (pending.get(key) === entry) {
         pending.delete(key);
         log(`挂起请求超时 (${key})`);
@@ -9277,7 +9283,12 @@ async function main(options = {}) {
               reverse.delete(frame.sessionId);
               api.events.forget?.(frame.sessionId);
               // 延迟停用/归档：本轮回复的发送在同一次事件处理的后半段，先让它发完。
-              setTimeout(() => stopRetiredSessionWork(frame.sessionId, retiringNow.key), 4000);
+              const retireTimer = setTimeout(() => {
+                if (shuttingDown) return;
+                stopRetiredSessionWork(frame.sessionId, retiringNow.key);
+              }, 4000);
+              retireTimer.unref?.();
+              embeddedTimers.push(retireTimer);
               log(`退役会话的在途回合已结束，稍后停用 ${retiringNow.key} -> ${frame.sessionId}`);
             }
             // 只有“发送成功”才跳过自动转发；如果工具调用失败，仍允许 AI 的文本正常发出。
@@ -10072,6 +10083,7 @@ async function main(options = {}) {
     if (snowlumaHealth.downTimer) clearTimeout(snowlumaHealth.downTimer);
     snowlumaHealth.downTimer = setTimeout(() => {
       snowlumaHealth.downTimer = null;
+      if (shuttingDown) return;
       if (snowlumaHealth.connected === true) return;
       notifySendChannelDown(snowlumaHealth.downReason || 'SnowLuma 连接断开');
     }, 15_000);
@@ -10166,7 +10178,20 @@ async function main(options = {}) {
         }
         embeddedTimers.length = 0;
         try { clearAllSocialV2Timers(); } catch {}
+        // 社交模式 scheduleSocialReply 登记在 social.pendingTimers 里的延迟投递 —
+        // 独立于上面的会话级定时器，stop 时必须一并清掉，否则它会在 shutdown 期间
+        // 到期后绕过 shutdown 门再次调用 deliverPrompt（已加 shuttingDown 门但保险起见）。
+        try { cancelAllSocialTimers(); } catch {}
+        // 挂起问答的超时定时器（pending Map 全局持有）。同样有 shuttingDown 门，
+        // 但直接清 entry.timer 让它从根源停掉。
+        try {
+          for (const [, entry] of pending) {
+            try { clearTimeout(entry.timer); } catch {}
+          }
+          pending.clear();
+        } catch {}
         try { if (social.loopTimer) clearInterval(social.loopTimer); } catch {}
+        try { if (typeof runLogTrimTimer !== 'undefined') clearInterval(runLogTrimTimer); } catch {}
         try { purpose.stop(); } catch {}
         try { if (proactiveTimer) { clearInterval(proactiveTimer); proactiveTimer = null; } } catch {}
         try { await qqRegistry.stopAll(); } catch {}
