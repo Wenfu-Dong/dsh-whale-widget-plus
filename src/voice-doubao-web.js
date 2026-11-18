@@ -256,6 +256,49 @@ async function closeSettingsIfOpen(page) {
   }
 }
 
+// 网页上的引导类弹窗（整屏「下载电脑版」、「新手引导」等）会盖在输入框上，
+// 导致 .ProseMirror 点不到 → 合成超时 → 一路回落到 edge（用户听到微软音色）。
+// 这类弹窗 Escape 关不掉，只能点它自己的「下次提醒我 / 关闭」。这里只点这类
+// 「关掉/稍后」按钮，绝不点「下载」「确定」「登录」等会改变页面状态/账号的按钮。
+const DISMISS_BUTTON_RE = /^(下次提醒我|关闭|我知道了|知道了|稍后再说|暂不|跳过|取消)$/;
+
+async function dismissBlockingDialogs(rt) {
+  const { page } = rt;
+  // 可能有连环弹窗（关掉一个又弹一个），最多来回三轮，避免死循环。
+  for (let round = 0; round < 3; round += 1) {
+    const dialogs = page.locator('[role="dialog"][data-state="open"]');
+    const total = await dialogs.count().catch(() => 0);
+    let closedAny = false;
+    for (let i = 0; i < total; i += 1) {
+      const dialog = dialogs.nth(i);
+      if (!(await dialog.isVisible().catch(() => false))) continue;
+      // 设置弹窗由 closeSettingsIfOpen 负责（它有专门的关闭按钮和后续列表操作）。
+      const testid = await dialog.getAttribute('data-testid').catch(() => '');
+      if (testid === 'settings_modal') continue;
+      const btn = dialog.getByRole('button', { name: DISMISS_BUTTON_RE }).first();
+      if (!(await btn.count().catch(() => 0))) continue;
+      await btn.click({ timeout: 5000 }).catch(() => {});
+      const hidden = await dialog.waitFor({ state: 'hidden', timeout: 5000 }).then(() => true).catch(() => false);
+      if (hidden) closedAny = true;
+    }
+    if (!closedAny) return;
+    await page.waitForTimeout(300);
+  }
+}
+
+/** 点击输入框；被弹窗挡住时先关弹窗再点一次（弹窗可能在页面加载几秒后才出现）。 */
+async function focusEditor(rt) {
+  const editor = rt.page.locator('.ProseMirror').first();
+  try {
+    await editor.click({ timeout: 15000 });
+    return;
+  } catch {
+    await dismissBlockingDialogs(rt);
+    await rt.page.waitForTimeout(300);
+    await editor.click({ timeout: 15000 });
+  }
+}
+
 async function ensureChatPage(rt) {
   const { page } = rt;
   if (!/doubao\.com/.test(page.url())) {
@@ -272,6 +315,9 @@ async function ensureChatPage(rt) {
     }
     throw new Error(`豆包网页没加载出输入框（网络/改版/风控都可能）：${text.replace(/\s+/g, ' ').slice(0, 80)}`);
   }
+  // 输入框可见 ≠ 可点：整屏「下载电脑版」引导弹窗会一直盖在上面，先关掉。
+  // 关不掉也不在这里报错，由真正点击输入框时再兜一次底。
+  await dismissBlockingDialogs(rt).catch(() => {});
 }
 
 function normalizeWords(text) {
@@ -287,6 +333,7 @@ function normalizeWords(text) {
 async function openVoiceList(rt) {
   const { page } = rt;
   await closeSettingsIfOpen(page);
+  await dismissBlockingDialogs(rt).catch(() => {});
   await page.locator('[data-testid="sidebar_footer_setting_entry"]').click({ timeout: 15000 });
   const modal = page.locator('[data-testid="settings_modal"]');
   await modal.waitFor({ state: 'visible', timeout: 15000 });
@@ -485,11 +532,11 @@ function cacheKey(input) {
 async function runOneTts(rt, say, timeoutMs) {
   const { page, capture } = rt;
   await closeSettingsIfOpen(page);
+  await dismissBlockingDialogs(rt).catch(() => {});
   capture.sessions = [];
   const baseline = await snapshot(page);
 
-  const editor = page.locator('.ProseMirror').first();
-  await editor.click({ timeout: 15000 });
+  await focusEditor(rt);
   // 兜底清空：上一次若失败可能残留草稿，直接追加会把两段话一起念。
   await page.keyboard.press('Control+A').catch(() => {});
   await page.keyboard.press('Delete').catch(() => {});
