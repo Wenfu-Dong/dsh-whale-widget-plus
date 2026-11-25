@@ -35,6 +35,7 @@ import { NodeApiClient, unwrap, discoverDshLaunchToken } from '../../src/dsh-cli
 import { createSeeMeme } from '../../src/see-meme.js';
 import { getQqRuntimeServices } from '../../src/qq-runtime-services.js';
 import { createHumanizeGate } from '../../src/humanize-gate.mjs';
+import { sendDouyinWebMessages } from './douyin-web-send.js';
 
 function dshHomeDir() {
   return process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
@@ -151,6 +152,7 @@ const DEFAULT_CONFIG = {
   mentionNames: [],
   groupMentionOnly: true,
   dailyReplyLimit: 80,
+  webFallback: true,        // SDK 被 10509 拦下时，改用专用浏览器网页版补发
 };
 
 let logLine = () => {};
@@ -311,6 +313,7 @@ function normalizeConfig(raw) {
       : defaultMentionNames(),
     groupMentionOnly: value.groupMentionOnly !== false,
     dailyReplyLimit: Number.isFinite(Number(value.dailyReplyLimit)) ? Math.max(1, Math.min(500, Number(value.dailyReplyLimit))) : 80,
+    webFallback: value.webFallback !== false,
   };
 }
 
@@ -351,6 +354,7 @@ const runtime = {
   smsMobile: '',
   verificationAt: 0,
   error: '',
+  sendBlocked: '',        // 非空 = 发送通道被官方签名校验拦截，暂停自动回复
   loginTask: null,
 };
 let pluginCtx = null;
@@ -926,6 +930,17 @@ function describeError(error) {
   return String(error).slice(0, 300);
 }
 
+// 2026-11-10 起抖音对发送接口（/v1/message/send/）加了原生 SDK 的 X-Tt-Token 签名校验，
+// douyin-im 1.1.0 的纯 JS 发送一律被拒（status=3 check=10509「升级最新版本」）；
+// 收消息、拉群列表都正常。上游 issue：zhinjs/douyin-im#7，暂无纯 JS 解法。
+// 识别到它就把自动回复停掉：否则每来一条消息都要跑一次模型，再必然发送失败（白烧 token）。
+const SEND_GUARD_HINT = '抖音要求新版客户端签名（check=10509），当前 douyin-im 发不出消息；接收正常，需等 SDK 更新';
+
+function sendGuardReason(error) {
+  const raw = String(error?.message ?? error ?? '');
+  return /check=10509|10509|升级最新版本/.test(raw) ? SEND_GUARD_HINT : '';
+}
+
 function bindEvents(client) {
   if (listenersBound) return;
   listenersBound = true;
@@ -989,6 +1004,7 @@ function bindEvents(client) {
     runtime.account = runtime.account ?? findAccount(client);
     runtime.nickname = String(runtime.account?.nickname ?? '');
     runtime.error = '';
+    runtime.sendBlocked = '';
     runtime.qr = '';
     log(`已上线：${runtime.nickname || runtime.uid}`);
   });
@@ -1045,6 +1061,7 @@ async function beginLogin(login) {
     client = await getClient();
   }
   runtime.error = '';
+  runtime.sendBlocked = '';
   runtime.phase = 'starting';
   try {
     // 用户主动点登录 = 要一次全新的登录，不复用已失效的旧会话。
@@ -1122,6 +1139,7 @@ export function douyinImStatus() {
     mentionNames: config.mentionNames,
     groupMentionOnly: config.groupMentionOnly,
     dailyReplyLimit: config.dailyReplyLimit,
+    webFallback: config.webFallback,
     friends,
     groups,
     today: { date: state.date, replies: state.replies },
@@ -1187,6 +1205,7 @@ export function douyinImSaveConfig(payload = {}) {
     ...(payload.mentionNames === undefined ? {} : { mentionNames: payload.mentionNames }),
     ...(payload.groupMentionOnly === undefined ? {} : { groupMentionOnly: payload.groupMentionOnly === true }),
     ...(payload.dailyReplyLimit === undefined ? {} : { dailyReplyLimit: payload.dailyReplyLimit }),
+    ...(payload.webFallback === undefined ? {} : { webFallback: payload.webFallback === true }),
   });
   saveConfig(next);
   return douyinImStatus();
@@ -1291,6 +1310,8 @@ async function handleMessage(event) {
     if (selfUid && String(event?.senderUid ?? '') === selfUid) return;
     const config = douyinImConfig();
     if (!config.enabled) return;
+    // 发送通道已被官方签名校验拦截：模型照跑也发不出去，直接跳过（状态面板里有原因）。
+    if (runtime.sendBlocked) return;
     const conversation = conversationOf(event);
     if (!conversation) { log(`收到消息但认不出会话：type=${String(event?.type ?? '')}`); return; }
     log(`收到消息：${conversation.key}（${conversation.isGroup ? '群' : '私聊'}）${String(textOf(event)).slice(0, 40)}`);
@@ -1472,19 +1493,47 @@ async function flushBatch({ conversation, batch }) {
       return;
     }
     const latest = batch.at(-1).event;
+    const webFallbackEnabled = douyinImConfig().webFallback;
+    let usedWebFallback = false;
     // 拆条连发：真人不会把一屏话塞进一个气泡。条与条之间按条长停一下，像在打第二句。
     for (let i = 0; i < bubbles.length; i += 1) {
-      const response = await latest.reply(bubbles[i]);
-      const statusCode = Number(response?.statusCode ?? 0);
-      const statusMsg = String(response?.statusMsg ?? response?.message ?? '');
-      if (statusCode && statusCode !== 0) throw new Error(`发送被拒：${statusCode} ${statusMsg}`.trim());
+      try {
+        const response = await latest.reply(bubbles[i]);
+        const statusCode = Number(response?.statusCode ?? 0);
+        const statusMsg = String(response?.statusMsg ?? response?.message ?? '');
+        if (statusCode && statusCode !== 0) throw new Error(`发送被拒：${statusCode} ${statusMsg}`.trim());
+      } catch (error) {
+        // 只有官方签名校验拦截才走浏览器兜底；网络抖动等错误照常抛。
+        const guard = sendGuardReason(error);
+        if (!guard || !webFallbackEnabled) throw error;
+        const rest = bubbles.slice(i);
+        log(`SDK 发送被拦截（${guard}），剩余 ${rest.length} 条改走网页版兜底`);
+        const fallback = await sendDouyinWebMessages({
+          displayName: conversation.displayName,
+          isGroup: conversation.isGroup,
+          texts: rest,
+          log,
+        });
+        if (!fallback.ok) {
+          const failed = new Error(String(error?.message ?? error) || '发送失败');
+          failed.douyinFallbackNote = `网页版兜底失败（已发 ${fallback.sent}/${rest.length} 条）：${fallback.reason}`;
+          throw failed;
+        }
+        runtime.sendBlocked = '';
+        usedWebFallback = true;
+        log(`网页版兜底完成：${fallback.sent}/${rest.length} 条 → ${fallback.contact?.displayName || conversation.displayName}`);
+        break;
+      }
       if (i < bubbles.length - 1) {
         const wait = Math.min(2500, 500 + bubbles[i].length * 60 + Math.floor(Math.random() * 400));
         await new Promise((resolve) => setTimeout(resolve, wait));
       }
     }
     // 模型主动引用的表情先发；没有再自动补一张，避免两张。
-    if (prepared.images.length) void sendDouyinImages(latest, prepared.images);
+    // 走网页版兜底时 SDK 仍然发不出表情，跳过以免白报错。
+    if (usedWebFallback) {
+      if (prepared.images.length) log(`网页版兜底只补文字，表情已跳过 ${conversation.key}`);
+    } else if (prepared.images.length) void sendDouyinImages(latest, prepared.images);
     else void maybeSendDouyinSticker(latest, text);
 
     const state = readState();
@@ -1506,7 +1555,14 @@ async function flushBatch({ conversation, batch }) {
       try { chat.handle?.dispose?.(); } catch { /* 释放失败也不影响 */ }
     }
     runtime.error = String(error?.message ?? error).slice(0, 240);
-    log(`回复 ${conversation.displayName} 失败：${runtime.error}`);
+    const guard = sendGuardReason(error);
+    if (guard) {
+      runtime.sendBlocked = guard;
+      runtime.error = error?.douyinFallbackNote ? `${guard}；${error.douyinFallbackNote}` : guard;
+      log(`回复 ${conversation.displayName} 失败：${runtime.error}（已暂停自动回复，重启 DSH 或 SDK 更新后恢复）`);
+    } else {
+      log(`回复 ${conversation.displayName} 失败：${runtime.error}`);
+    }
     // 失败只写日志 / 面板（runtime.error），**不再往聊天里发**「没接上，你再说一次？」。
     // 那句话是内部兜底话术：格式像旁白、会被当成角色说的话，失败一次就刷一次，很出戏。
     throw error;

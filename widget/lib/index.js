@@ -3404,6 +3404,9 @@ export default {
               exprPack: exprPackId(parsed.exprPack),
               exprOn: exprBoolOn(parsed.exprOn),
               blinkOn: exprBoolOn(parsed.blinkOn),
+              // 待机信封入口（像素小鲸鱼 + ♥ PET / 🍤 FEED）：issue #11，默认开；
+              // 关掉后整个 .dshwv-qqenv-dock 不渲染（不接 QQ 的用户常被它误点）。
+              qqEnvOn: parsed.qqEnvOn !== false,
               // 厂商额度（选装）：默认全关（老配置里没这三键 ⇒ 不显示厂商额度、不请求火山额度）
               vendorQuotaOn: parsed.vendorQuotaOn === true,
               vendorQuotaModel: typeof parsed.vendorQuotaModel === 'string' ? parsed.vendorQuotaModel : '',
@@ -3415,7 +3418,7 @@ export default {
       return null
     }
 
-    function writeSizeConfig(scale, sound, vol, soundSet, usageMode, peakMode, bubbleOn, pressOnArg, turnCostOn, turnCostCloseMs, scrollGapOn, scrollGapPx, menuBtnHide, codexStatsOnArg, exprPackArg, exprOnArg, blinkOnArg, vendorQuotaOnArg, vendorQuotaModelArg, volcQuotaOnArg) {
+    function writeSizeConfig(scale, sound, vol, soundSet, usageMode, peakMode, bubbleOn, pressOnArg, turnCostOn, turnCostCloseMs, scrollGapOn, scrollGapPx, menuBtnHide, codexStatsOnArg, exprPackArg, exprOnArg, blinkOnArg, vendorQuotaOnArg, vendorQuotaModelArg, volcQuotaOnArg, qqEnvOnArg) {
       const um = normalizeUsageMode(usageMode)
       const pm = peakMode === 'liangwen' || peakMode === 'qiangqiang' ? peakMode : 'default'
       const bo = bubbleOn !== false
@@ -3433,6 +3436,8 @@ export default {
       const vqo = vendorQuotaOnArg === true
       const vqm = typeof vendorQuotaModelArg === 'string' ? vendorQuotaModelArg : ''
       const vlo = volcQuotaOnArg === true
+      // issue #11：待机信封入口（默认显示；关掉后整个 dock 不渲染）
+      const qeo = qqEnvOnArg !== false
       const body = JSON.stringify({
         scale: scale,
         sound: sound !== false,
@@ -3454,6 +3459,7 @@ export default {
         vendorQuotaOn: vqo,
         vendorQuotaModel: vqm,
         volcQuotaOn: vlo,
+        qqEnvOn: qeo,
         updatedAt: new Date().toISOString(),
       })
       let lastSizeErr = null
@@ -3482,6 +3488,7 @@ export default {
             vendorQuotaOn: vqo,
             vendorQuotaModel: vqm,
             volcQuotaOn: vlo,
+            qqEnvOn: qeo,
           }
         } catch (err) { lastSizeErr = err }
       }

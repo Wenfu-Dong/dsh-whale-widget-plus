@@ -93,8 +93,16 @@ export function createPetApiService({ chat, purpose, petService, stateDir, petRo
     return rec.key;
   }
 
+  // 缓存 key 不止纯 hash：豆包网页 / 豆包 / 千问等音源的文件名带前缀（doubao-web-xxxx、doubao-xxxx…）。
+  // 以前这里把非 hex 字符全删掉，doubao-web-xxxx 会被削成另一个字符串 → /audio/<key>.wav 必然 404
+  // → 挂件只能退回浏览器 speechSynthesis（用户听到的就是系统默认音色，2026-11-25 定位）。
+  function safeAudioKey(key) {
+    const raw = String(key ?? '');
+    return /^[A-Za-z0-9_-]{1,80}$/.test(raw) ? raw : '';
+  }
+
   function audioUrlFor(key) {
-    const safe = String(key ?? '').replace(/[^a-f0-9]/gi, '');
+    const safe = safeAudioKey(key);
     if (!safe) return '';
     return `${API_PREFIX}/audio/${safe}.wav?at=${encodeURIComponent(issueAudioToken(safe))}`;
   }

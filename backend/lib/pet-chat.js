@@ -474,13 +474,21 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     };
     if (message.proactive) out.proactive = true;
     if (message.audioKey) {
-      const file = path.join(voiceDir, `${message.audioKey}.wav`);
+      // 缓存音频不止 wav：豆包网页 / 豆包 / 千问等音源输出 mp3（文件名 `<route>-<hash>.mp3`）。
+      // 以前这里只找 .wav，这些音源的对话音频永远挂不上（前端只能退回系统朗读）。
+      let audioFile = audioFiles.get(String(message.audioKey));
+      if (!audioFile) {
+        for (const ext of ['.wav', '.mp3']) {
+          const candidate = path.join(voiceDir, `${message.audioKey}${ext}`);
+          if (fs.existsSync(candidate)) { audioFile = candidate; break; }
+        }
+      }
       try {
-        if (fs.existsSync(file)) {
+        if (audioFile && fs.existsSync(audioFile)) {
           out.audio = {
             key: message.audioKey,
             url: audioUrl(message.audioKey),
-            durationMs: wavDurationMs(fs.readFileSync(file)),
+            durationMs: /\.wav$/i.test(audioFile) ? wavDurationMs(fs.readFileSync(audioFile)) : 0,
           };
         }
       } catch {}
@@ -490,8 +498,10 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
 
   /** 音频播放地址（带本地令牌；桌宠用 <audio> 直接拉，不需要 Cookie）。 */
   function audioUrl(key) {
-    const safe = String(key ?? '').replace(/[^a-f0-9]/gi, '');
-    if (!safe) return '';
+    // key 可能是 doubao-web-xxxx / doubao-xxxx 这种带音源前缀的名字：不能只保留 hex，
+    // 否则前端拿到的地址和缓存文件对不上（404 → 只能退回系统朗读）。
+    const safe = String(key ?? '');
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(safe)) return '';
     return `/dsh-surfcore/pet-api/audio/${safe}.wav?token=${encodeURIComponent(token())}`;
   }
 
@@ -746,11 +756,20 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     }
   }
 
-  /** 供 pet-api 读 wav：只认 voice 目录里的 hash 文件名，不接受任意路径。 */
+  /** 供 pet-api 读音频：只认 voice 目录里的缓存文件名，不接受任意路径。 */
   function readAudio(key) {
-    const safe = String(key ?? '').replace(/[^a-f0-9]/gi, '');
-    if (!safe || safe !== String(key ?? '')) return null;
-    const file = audioFiles.get(safe) || path.join(voiceDir, `${safe}.wav`);
+    // key 允许带音源前缀（doubao-web-xxxx）；仍只接受 [A-Za-z0-9_-]，杜绝路径穿越。
+    const safe = String(key ?? '');
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(safe)) return null;
+    let file = audioFiles.get(safe);
+    if (!file) {
+      // 重启后内存表是空的：按缓存目录里的真实扩展名找（边沿源是 wav，豆包系是 mp3）。
+      for (const ext of ['.wav', '.mp3']) {
+        const candidate = path.join(voiceDir, `${safe}${ext}`);
+        if (fs.existsSync(candidate)) { file = candidate; break; }
+      }
+    }
+    if (!file) return null;
     try {
       const stat = fs.statSync(file);
       if (!stat.isFile() || stat.size < 44) return null;

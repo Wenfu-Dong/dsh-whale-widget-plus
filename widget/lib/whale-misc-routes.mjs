@@ -193,7 +193,9 @@ export function createWhaleMiscRoutes(deps) {
           // 厂商额度（选装）：默认关；vendorQuotaModel 允许显式传空串来清除选择（同 exprPack 的处理）
           pickB(parsed.vendorQuotaOn, old.vendorQuotaOn, false),
           typeof parsed.vendorQuotaModel === 'string' ? parsed.vendorQuotaModel : (typeof old.vendorQuotaModel === 'string' ? old.vendorQuotaModel : ''),
-          pickB(parsed.volcQuotaOn, old.volcQuotaOn, false)
+          pickB(parsed.volcQuotaOn, old.volcQuotaOn, false),
+          // issue #11：待机信封入口整体开关（默认开）
+          pickB(parsed.qqEnvOn, old.qqEnvOn, true)
         )
         res.writeHead(result.ok ? 200 : 500, JSON_HEADERS)
         // 配置刚变（可能刚关掉/打开 Codex 统计）→ 丢掉旧快照，让下一次请求立刻反映新设置

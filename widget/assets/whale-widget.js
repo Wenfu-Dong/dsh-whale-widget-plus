@@ -2608,6 +2608,21 @@ bubbleCustomBtn.textContent = '按压泡泡设置'
 bubbleCustomBtn.title = '打开“按压泡泡设置”（按压时的泡泡内容与队列）'
 bubbleCustomBtn.addEventListener('click', function (e) { e.stopPropagation(); openBubbleEditor() })
 row6.appendChild(bubbleCustomBtn)
+// issue #11：待机信封入口（小鲸鱼 + ♥ PET / 🍤 FEED）是一体的，只给一个全显/全藏开关；
+// 关掉后 QQ 未读入口也一起消失 —— 不接 QQ 的用户正需要这个效果。
+var qqEnvToggle = document.createElement('input')
+qqEnvToggle.type = 'checkbox'
+qqEnvToggle.className = 'dshwv-check'
+qqEnvToggle.checked = true
+qqEnvToggle.title = '显示待机信封入口（像素小鲸鱼 + ♥ PET / 🍤 FEED）；关掉后整个入口隐藏'
+qqEnvToggle.addEventListener('change', function () { setQqEnvOn(qqEnvToggle.checked) })
+var rowEnv = menuRow()
+// issue #11：整行都能点 —— 只让 16px 的复选框可点，用户点文字时会以为"开关没反应"。
+var qqEnvLabel = document.createElement('label')
+qqEnvLabel.style.cssText = 'display:flex;align-items:center;justify-content:space-between;width:100%;cursor:pointer'
+qqEnvLabel.appendChild(menuLabel('待机信封入口'))
+qqEnvLabel.appendChild(qqEnvToggle)
+rowEnv.appendChild(qqEnvLabel)
 var menuSep1 = document.createElement('div')
 menuSep1.className = 'dshwv-menu-sep'
 // v720:「自动关闭 n 秒」与「任务结束音效」都收进「自定义提示」窗口,这一行只留开关 + 入口按钮
@@ -3007,6 +3022,7 @@ var petSep2 = document.createElement('div')
 petSep2.className = 'dshwv-menu-sep dshwv-pet-only'
 menuBox.appendChild(petSep2)
 moreNotice.push(row6)
+moreNotice.push(rowEnv)
 // —— 峰谷徽标：外置常驻徽标的状态字样式（localStorage 持久化，改完即时重绘徽标）——
 // 样式取值与峰谷模块 peakStyle 同一套：mini=峰/谷，liangwen=梁文峰/梁文谷，
 // gaofeng=高峰/低谷（v0.4.3 新增），custom=自定义文字（v0.4.3 新增，读 peakLabel/offLabel）
@@ -4287,6 +4303,8 @@ function conBindExtras() {
     ex.exprOn = null
     ex.blink = doc.getElementById('con-blink')
     ex.bubble = doc.getElementById('con-bubble')
+    // issue #11：待机信封入口（像素小鲸鱼 + ♥ PET / 🍤 FEED）开关，放在新版控制台「呈现与位置」
+    ex.qqenv = doc.getElementById('con-qqenv')
     ex.pack = doc.getElementById('con-expr-pack')
     ex.exprItem = doc.getElementById('con-expr-item')
     ex.line = doc.getElementById('con-line')
@@ -4318,6 +4336,7 @@ function conBindExtras() {
     }
     swCell(ex.blink, function () { try { exprSetBlink(!exprBlinkOn); saveConfig() } catch (err) {} })
     swCell(ex.bubble, function () { try { setBubbleOn(!(bubbleOn !== false)) } catch (err) {} })
+    swCell(ex.qqenv, function () { try { setQqEnvOn(!qqEnvOn) } catch (err) {} })
 
     // 厂商额度（选装）：关掉时只显示 DeepSeek 余额；打开后气泡追加所选厂商模型的额度行
     function vqOpenAdd() {
@@ -4657,6 +4676,7 @@ function dshwvConSync() {
       try { if (ex.roleFill) ex.roleFill() } catch (err) {}
       conSetSw(ex.blink, !!exprBlinkOn)
       conSetSw(ex.bubble, bubbleOn !== false)
+      conSetSw(ex.qqenv, qqEnvOn !== false)
       try {
         var pbv = dshwPbLabelGet()
         if (ex.pbLabel) ex.pbLabel.value = pbv.mode || 'mini'
@@ -22419,6 +22439,8 @@ var costBubbleActive = false
 var scrollGapOn = false
 var scrollGapPx = 17
 var menuBtnHide = false // 主菜单开关:隐藏挂件菜单按钮,改为右键小鲸鱼唤出菜单
+// issue #11：待机信封入口（像素小鲸鱼 + ♥ PET / 🍤 FEED）整体开关，默认显示。
+var qqEnvOn = true
 // 厂商额度（选装）：默认全关 —— 不配厂商模型、不看火山额度时，挂件只显示 DeepSeek 余额。
 // vendorQuotaOn = 气泡里自动追加「所选厂商模型」的额度行（渲染时注入，不改用户的泡泡配置）；
 // vendorQuotaModel = 选中的厂商模型 id（'' = 自动取第一个非内置模型）；
@@ -22490,7 +22512,7 @@ function configPayload() {
   //   宿主白名单、读侧合并、客户端回填都做了，唯独这里没发 ⇒ 宿主 pickB 走"沿用旧值(true)" ⇒ 永远存不住。
   //   与 v863 的 subagent.mute 是同一类"半截活"：新键必须走完 **四件套**
   //   ① 客户端 PUT 载荷 → ② 宿主写侧白名单 → ③ 宿主读侧合并 → ④ 客户端回填。
-  return JSON.stringify({ scale: state.scale, sound: soundOn, pressOn: pressOn !== false, vol: soundVol, soundSet: soundSet, usageMode: usageMode, peakMode: peakMode, bubbleOn: bubbleOn, turnCostOn: turnCostOn, turnCostCloseMs: turnCostCloseMs, scrollGapOn: scrollGapOn, scrollGapPx: scrollGapPx, menuBtnHide: menuBtnHide, codexStatsOn: codexStatsOn, exprPack: exprPack, exprOn: exprOn, blinkOn: exprBlinkOn, vendorQuotaOn: vendorQuotaOn, vendorQuotaModel: vendorQuotaModel, volcQuotaOn: volcQuotaOn })
+  return JSON.stringify({ scale: state.scale, sound: soundOn, pressOn: pressOn !== false, vol: soundVol, soundSet: soundSet, usageMode: usageMode, peakMode: peakMode, bubbleOn: bubbleOn, turnCostOn: turnCostOn, turnCostCloseMs: turnCostCloseMs, scrollGapOn: scrollGapOn, scrollGapPx: scrollGapPx, menuBtnHide: menuBtnHide, codexStatsOn: codexStatsOn, exprPack: exprPack, exprOn: exprOn, blinkOn: exprBlinkOn, vendorQuotaOn: vendorQuotaOn, vendorQuotaModel: vendorQuotaModel, volcQuotaOn: volcQuotaOn, qqEnvOn: qqEnvOn })
 }
 // 真正的 PUT：读响应 → 失败（网络异常 / HTTP!=200 / {ok:false}）静默重试一次 → 仍失败才提示
 function configPut(payload, retried) {
@@ -22571,6 +22593,24 @@ function saveAnchorPos() {
       vDist: Math.max(0, Math.round(Math.min(topDist, bottomDist)))
     }))
   } catch (err) {}
+}
+// issue #11：待机信封入口整体隐藏（默认显示）。关掉后把 dock 从 body 摘下，不再定位；
+// 重新打开时挂回去并立刻展开（未读数不清零，徽标还在）。
+function petQqEnvDetachFromBody() {
+  try { clearInterval(petQqEnvFollowTimer) } catch (err) {}
+  petQqEnvFollowTimer = 0
+  try { if (petQqEnvEl) { petQqEnvEl.classList.remove('dshwv-qqenv-on', 'dshwv-qqenv-ring'); petQqEnvEl.style.display = ''; petQqEnvEl.style.opacity = '' } } catch (err) {}
+  try { if (petQqEnvDockEl) { petQqEnvDockEl.classList.remove('dshwv-qqenv-dock-on'); petQqEnvDockEl.style.display = '' } } catch (err) {}
+  try { if (petQqEnvDockEl) dshwBodyDetach(petQqEnvDockEl) } catch (err) {}
+}
+function setQqEnvOn(v) {
+  qqEnvOn = v !== false
+  if (qqEnvToggle) qqEnvToggle.checked = qqEnvOn
+  saveConfig()
+  if (!qqEnvOn) { petQqEnvDetachFromBody(); return }
+  // 之前建过 dock：先挂回 body，再按当前未读状态展开
+  try { if (petQqEnvDockEl && !dshwConnected(petQqEnvDockEl)) dshwBodyAppend(petQqEnvDockEl) } catch (err) {}
+  try { petQqEnvShow() } catch (err) {}
 }
 function setBubbleOn(v) {
   bubbleOn = !!v
@@ -27742,6 +27782,11 @@ function petQqEnvFollow() {
   try { clearInterval(petQqEnvFollowTimer) } catch (err) {}
   petQqEnvFollowTimer = setInterval(function () {
     try {
+      if (!qqEnvOn) {
+        clearInterval(petQqEnvFollowTimer)
+        petQqEnvFollowTimer = 0
+        return
+      }
       if (!petQqEnvEl) {
         clearInterval(petQqEnvFollowTimer)
         petQqEnvFollowTimer = 0
@@ -27761,6 +27806,8 @@ function petQqEnvFollow() {
   }, 300)
 }
 function petQqEnvShow() {
+  // issue #11：用户关掉「待机信封入口」后，未读/卡片关闭等任何路径都不再把它挂回来
+  if (!qqEnvOn) return
   try {
     petQqEnvBuild()
     petQqEnvApplyTheme()
@@ -31078,6 +31125,13 @@ function sizeCfgApply(d) {
     if (d && typeof d.menuBtnHide === 'boolean') {
       menuBtnHide = d.menuBtnHide
       if (menuHideToggle) menuHideToggle.checked = menuBtnHide
+    }
+    // issue #11：待机信封入口（老配置里没有这个键 → 保持默认「显示」）。
+    // 配置可能在启动后才读回来：关掉时要把已经挂上的 dock 摘掉，不能等下次启动。
+    if (d && typeof d.qqEnvOn === 'boolean') {
+      qqEnvOn = d.qqEnvOn
+      if (qqEnvToggle) qqEnvToggle.checked = qqEnvOn
+      if (!qqEnvOn) { try { petQqEnvDetachFromBody() } catch (err) {} }
     }
     // 厂商额度（选装）：三个新键，老配置里没有 → 保持默认「全关」
     if (d && typeof d.vendorQuotaOn === 'boolean') vendorQuotaOn = d.vendorQuotaOn
