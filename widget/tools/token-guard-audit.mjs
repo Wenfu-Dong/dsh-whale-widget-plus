@@ -51,7 +51,9 @@ for (const bad of [NaN, -3, 1.5, '7', null, undefined]) {
 
 // ── 3) evaluateWakeBudget ──
 {
-  const now = Date.now();
+  // 固定取「本地日内 12:00」而不是 Date.now()：直接用它时，CI 在 UTC 00:00–03:00 跑，
+  // now-3h 会落到昨天零点之前，dayCount 变成 2（时区/时段相关的假红，与守卫逻辑无关）。
+  const now = localDayStart(Date.now()) + 12 * 3600_000;
   const g = DEFAULT_TOKEN_GUARD;
   // 当日计数：今天 3 次 + 昨天 5 次 → dayCount=3
   const times = [now - 3600_000, now - 7200_000, now - 10800_000, localDayStart(now) - 1000, localDayStart(now) - 86_400_000];
