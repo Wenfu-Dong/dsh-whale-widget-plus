@@ -27,7 +27,8 @@
 // 配套文件：
 //   tools/ci-audit.allowlist.json   第 ⑤ 项的允许清单（仓库自己的文件，不是脚本里的常量）
 //   tools/ci-audit-selftest.mjs     本脚本的自检（先干净样本全绿，再逐项证明写坏必红）
-// 门禁挂载：.github/workflows/ci.yml 用 `--no-pack`（日常），publish.yml 用完整版（发布前）。
+// 门禁挂载：.github/workflows/{ci,publish}.yml 都只调用 scripts/ci-gate.mjs（单一清单），
+//          本脚本作为其中一项被 gate 调起（--no-pack）。
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -506,32 +507,41 @@ run('3', '检查打包后是否可以运行', (problems, notes) => {
 })
 
 // ---------------------------------------------------------------------------
-// ④ 门禁一致性：日常检查(ci.yml) 与 发布前门禁(publish.yml) 必须覆盖同一组关键检查
+// ④ 门禁一致性：日常检查(ci.yml) 与 发布前门禁(publish.yml) 必须走同一份清单
 // ---------------------------------------------------------------------------
 run('4', '检查日常ci与发版ci流程是否一致', (problems, notes) => {
+  // 2026-11 起门禁清单只有一份：scripts/ci-gate.mjs。
+  // 两条 workflow 都必须调用它；关键检查必须仍在门禁脚本里（防止某一项被悄悄摘掉）。
+  const GATE = 'scripts/ci-gate.mjs'
   const REQUIRED = [
     { name: '图层审计', re: /z-layer-audit\.mjs/ },
-    { name: '语法检查', re: /node\s+--check\s+lib\/index\.js/ },
+    { name: '语法检查', re: /--check/ },
     { name: '开发机路径扫描', re: /TestBox/ },
+    { name: '隐私扫描', re: /privacy-scan\.mjs/ },
+    { name: '核心不变量审计', re: /ci-audit\.mjs/ },
+    { name: '单元测试', re: /--test/ },
+    { name: '安装模拟', re: /install-simulation\.mjs/ },
   ]
   const wf = (rel) => (has(rel) ? read(rel) : null)
   const ciy = wf('.github/workflows/ci.yml')
   const pub = wf('.github/workflows/publish.yml')
+  const gate = wf(GATE)
+  const callsGate = (text) => /node\s+scripts\/ci-gate\.mjs/.test(text)
   if (!ciy) problems.push('缺少 .github/workflows/ci.yml')
   if (!pub) problems.push('缺少 .github/workflows/publish.yml')
-  for (const r of REQUIRED) {
-    if (ciy && !r.re.test(ciy)) problems.push('ci.yml 缺少「' + r.name + '」—— 日常 push/PR 挡不住这类问题')
-    if (pub && !r.re.test(pub)) problems.push('publish.yml 缺少「' + r.name + '」—— 审计不过也会发布')
-  }
-  if (ciy && pub) {
-    const ciHasAudit = /ci-audit\.mjs/.test(ciy)
-    const pubHasAudit = /ci-audit\.mjs/.test(pub)
-    if (ciHasAudit !== pubHasAudit) {
-      problems.push('ci-audit.mjs 只挂在一边（ci.yml=' + ciHasAudit + ' / publish.yml=' + pubHasAudit + '）—— 两处门禁必须同一份')
+  if (!gate) problems.push('缺少统一门禁脚本 ' + GATE)
+  if (ciy && !callsGate(ciy)) problems.push('ci.yml 没有调用统一门禁 ' + GATE + ' —— 日常 push/PR 挡不住这类问题')
+  if (pub && !callsGate(pub)) problems.push('publish.yml 没有调用统一门禁 ' + GATE + ' —— 审计不过也会发布')
+  if (gate) {
+    for (const r of REQUIRED) {
+      if (!r.re.test(gate)) problems.push('统一门禁里缺少「' + r.name + '」—— 日常与发版都会漏掉这一项')
     }
-    if (!ciHasAudit && !pubHasAudit) notes.push('提示：本脚本还没挂进任何 workflow（仅本地可跑）')
   }
-  notes.push('两份 workflow 的关键检查覆盖一致')
+  if (ciy && pub && gate && callsGate(ciy) && callsGate(pub)) {
+    notes.push('两份 workflow 都调用 ' + GATE + '；关键检查 ' + REQUIRED.length + ' 项齐全')
+  } else if (ciy && pub && !gate) {
+    notes.push('提示：门禁脚本还没建起来（仅本地可跑）')
+  }
 })
 
 // ---------------------------------------------------------------------------

@@ -27,6 +27,7 @@
     "presets": "node scripts/build-agent-preset-patches.mjs",
     "snowluma": "node scripts/install-snowluma.mjs",
     "audit": "node widget/tools/ci-audit.mjs --no-pack",
+    "gate": "node scripts/ci-gate.mjs",
     "test": "node --test \"test/*.test.mjs\"",
     "audit:install": "node scripts/install-simulation.mjs",
     "fix-host-shadow": "node scripts/fix-host-shadow.mjs",

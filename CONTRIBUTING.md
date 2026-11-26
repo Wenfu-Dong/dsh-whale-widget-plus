@@ -52,20 +52,26 @@ dsh-Dfy/
 ### 本地门禁（提交前）
 
 ```powershell
+npm run gate   # 与 CI 完全同一份清单（scripts/ci-gate.mjs），默认 TZ=UTC
+```
+
+门禁清单**只登记在 `scripts/ci-gate.mjs` 一处**：`ci.yml` / `publish.yml` 都只调用它，
+本地跑的是同一套。要加/改检查项请改那个脚本，**不要**往 workflow 里再抄命令
+（两份清单必然漂移，同一个 bug 会红两次）。门禁默认按 CI 的 UTC 跑，可以提前复现
+"本机 UTC+8 绿、CI 凌晨红"的时区假红。
+
+需要单项调试时仍可单独跑：
+
+```powershell
 node build.mjs --check                              # 构建产物与源一致
-node scripts/build-agent-preset-patches.mjs --check # preset 产物与源一致（需要先 npm install）
-node --check <改过的 .mjs/.js>                      # 语法
 node scripts/privacy-scan.mjs --strict              # 本机路径 / 账号 / 令牌 / 私钥
 node scripts/version.mjs check                      # 版本面一致
 node widget/tools/ci-audit.mjs --no-pack            # 路由安全 / 接口对等 / 注入面
-node widget/tools/bubble-config-audit.mjs           # 泡泡配置「全量替换」语义
-node widget/tools/choice-options-audit.mjs          # 并列候选不被静默裁掉
-node widget/tools/check-dead-settings.mjs           # 「控件有值、没有消费方」初筛
-node widget/tools/expr-smoke.mjs                    # 表情包清单 / 图片路由 / 配置键冒烟
-node widget/tools/ci-audit-selftest.mjs             # 审计脚本自检
+node widget/tools/ci-audit-selftest.mjs             # 审计脚本自检（含环境依赖扫描）
 ```
 
-除 `ci-audit.mjs --pack` 外都是 0 依赖脚本，`npm install` 之前也能跑；CI 跑的就是这一组。
+`npm run gate` 在 CI 里跑的是 24 步；本地与 CI 的唯一差异是「发布守卫」在本地跳过
+（它只对干净 clone 有意义，本机人设生成物属预期存在）。
 
 ### 发布流程（改版本号前必读）
 
@@ -73,15 +79,15 @@ node widget/tools/ci-audit-selftest.mjs             # 审计脚本自检
 AGENT.md 汇报模板、CHANGELOG 小节）必须与它一致 —— `node scripts/version.mjs check` 会逐一校验，
 CI 与发布门禁都会跑。
 
-- **日常检查**：`.github/workflows/ci.yml` 在 push 到 `main` 和 PR 时自动跑：全量 `node --check`、
-  构建产物一致性、版本一致性、隐私扫描（`--strict`）、开发机路径扫描、图层审计、挂件行为回归、
-  `ci-audit` 与审计脚本自检。**它永不发布。**
+- **日常检查**：`.github/workflows/ci.yml` 在 push 到 `main` 和 PR 时自动跑，只做两件事：
+  `npm ci`，然后 `node scripts/ci-gate.mjs`（全部门禁项都在这个脚本里，含全量 `node --check`、
+  构建产物一致性、版本一致性、隐私扫描、开发机路径扫描、各审计与安装模拟）。**它永不发布。**
 - **发版**：
   1. `node scripts/version.mjs bump patch`（自动同步 README 横幅 / AGENT 汇报模板 / 插入 CHANGELOG 空小节）
   2. 补 CHANGELOG 小节 → `git add -A && git commit -m "release: vX.Y.Z"`
   3. `node scripts/version.mjs tag --push` 打注释 tag 并推送
 - **发布门禁**：推送 `v*` tag（或在 Actions 里手动触发）会跑 `.github/workflows/publish.yml`：
-  第一件事就是校验 **tag == `package.json` 的 version**，然后重跑上面同一组检查。门禁失败就不要发。
+  第一件事就是校验 **tag == `package.json` 的 version**，然后调用同一份 `scripts/ci-gate.mjs`。门禁失败就不要发。
 - **本插件不做 npm 发布**：安装方式是把 GitHub 仓库 clone 到本机再 `node scripts/setup-dsh.mjs`
   注册进 DSH profile（见 README）。`publish.yml` 只做门禁，不上传任何产物；GitHub Release 需要手动创建。
 - **发布前必须扫隐私**：`node scripts/privacy-scan.mjs --strict`。历史上踩过的坑是工作树里散落真实的

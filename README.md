@@ -545,6 +545,7 @@ dsh plugin --profile <profile> remove dsh-dfy
 ## 开发与自检
 
 ```powershell
+npm run gate                                # 与 CI 同一份门禁清单（scripts/ci-gate.mjs），默认 TZ=UTC
 node build.mjs                              # lib/ui/*.js → lib/client.js（产物入库，必须重建）
 node build.mjs --check                      # 只校验产物与源一致（不一致 exit 1）
 node scripts/build-agent-preset-patches.mjs # dsh/agent-presets/* → presets/*.patch.yml
@@ -575,7 +576,8 @@ node widget/tools/live-endpoint-sweep.mjs   # 对运行中的服务做全端点�
 ```
 
 除 `ci-audit.mjs` 完整版（会跑一次 `npm pack`）外，以上都是 0 依赖脚本，`npm install` 之前也能跑。
-CI（`.github/workflows/ci.yml`）跑的就是这一组，外加全量 `node --check`。
+CI（`.github/workflows/ci.yml`）与发布门禁（`publish.yml`）都只调用 `scripts/ci-gate.mjs` 这一份清单，
+`npm run gate` 跑的是同一套 —— 加检查项请改那个脚本，不要往 workflow 里再抄一份。
 
 目录：
 

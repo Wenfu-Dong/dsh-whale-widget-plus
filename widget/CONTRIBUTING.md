@@ -54,8 +54,8 @@ dsh-whale-widget/
 │   └── z-layer-audit.mjs            59 行   浮层 z 层级自检（CI 与发布流程都会跑）
 │
 └── .github/workflows/
-    ├── ci.yml                       68 行   push / PR 到 main：图层审计 + 语法 + 开发机路径扫描
-    └── publish.yml                 186 行   **手动触发**：发布 npm + 建 GitHub Release
+    ├── ci.yml                       push / PR 到 main：npm ci → 统一门禁 scripts/ci-gate.mjs
+    └── publish.yml                  tag v* / 手动：tag 版本校验 + 同一份统一门禁（不发布 npm）
 ```
 
 > 上面的行数会随代码变化，不是硬约束。想核对或更新，用 `git ls-tree -r --long main` 看文件清单，用 `git show main:<路径>` 自行统计行数即可；改完请顺手更新本节和 README 里对应的数字。
@@ -64,11 +64,11 @@ dsh-whale-widget/
 
 **发布是手动触发的，push 不会发版。**
 
-- **日常检查**：`.github/workflows/ci.yml` 在 push 到 `main` 和 PR 到 `main` 时自动跑，只做检查、权限 `contents: read`、**永不发布**。它跑三件事：图层自检、两个前端/宿主文件的语法检查、以及"发布副本不得含开发机绝对路径"的扫描。
+- **日常检查**：`.github/workflows/ci.yml` 在 push 到 `main` 和 PR 到 `main` 时自动跑，只做两件事：安装依赖（`npm ci`），然后跑统一门禁 `scripts/ci-gate.mjs`（图层审计、语法检查、开发机路径扫描等全部检查项都登记在那一个脚本里）。权限 `contents: read`、**永不发布**。
 - **真正发版**：`.github/workflows/publish.yml` **只有手动触发**（GitHub Actions 页面的 Run workflow，或 `gh workflow run publish.yml`）。它可以填一个"发版原因"（会写在 Release 说明最前面），也支持 `dry_run` 演练 —— 跑完全部门禁并生成 Release 说明，但**不发布、不建 Release**。
 - **版本号不自动递增**：发出去的版本号就是 `package.json` 里的 `version` 字段。改版本号 → push → 手动触发，才会发布 npm 并创建 `v<version>` tag 与 GitHub Release。
 - **为什么必须手动**：npm 同名版本一旦发布就**不能覆盖**，只能 deprecate。所以"某次 push 恰好带了 version 变更就自动发布"是不安全的，这一步必须有人把关。
-- **发布前的门禁**：`publish.yml` 会在发布前把与 `ci.yml` 相同的检查再跑一遍（图层审计 + 语法 + 开发机路径），**审计不过就不允许发布**；另外如果 `package.json` 的版本号在 npm 上已经存在，会直接跳过发布，避免重复触发把 workflow 炸掉。
+- **发布前的门禁**：`publish.yml` 先校验 **tag == `package.json` 的 version**，再调用同一份 `scripts/ci-gate.mjs`，**审计不过就不允许发布**；另外如果 `package.json` 的版本号在 npm 上已经存在，会直接跳过发布，避免重复触发把 workflow 炸掉。
 - **发布副本必须先 strip**：宿主发布前必须跑一次 `_strip-dev-paths.mjs --apply`（它会删掉 `RUA_GIF_CANDIDATES` / `IMAGE_CANDIDATES` 这类开发机候选路径）。忘了跑的后果是老用户拿到的包会去读不存在的本机路径 —— 这正是 CI 里那个 `TestBox` 扫描要拦的东西。
 - 发布只允许在 `main` 上触发：手动触发时如果 `Use workflow from` 选成了别的分支，workflow 会硬失败并提示。
 

@@ -6,6 +6,9 @@
 // 这个自检就钉这两种坏法：先证明「干净样本全绿」，再**逐项**证明「写坏必红」。
 // 每个用例都造一个独立样本仓库，用 --only=<编号> 只跑被测的那一项，互不干扰。
 //
+// 另外扫一遍审计脚本自身的「环境依赖」：断言里直接读本机时钟/工作目录，
+// 会变成"本机 UTC+8 绿、CI UTC 红"的时区假红（0.7.11 token-guard-audit 的事故）。
+//
 // 用法：node tools/ci-audit-selftest.mjs
 import fs from 'node:fs'
 import os from 'node:os'
@@ -27,9 +30,22 @@ const WF = [
   'jobs:',
   '  audit:',
   '    steps:',
-  '      - run: node tools/z-layer-audit.mjs assets/whale-widget.js',
-  '      - run: node --check lib/index.js',
-  '      - run: grep -n "TestBox" lib/index.js lib/accounting.mjs assets/whale-widget.js',
+  '      - run: node scripts/ci-gate.mjs',
+  '',
+].join('\n')
+
+// 统一门禁样本：被 ④ 检查的关键项都在这里登记（真实仓库对应 scripts/ci-gate.mjs）
+const GATE = [
+  '// 统一门禁（样本）',
+  "const CHECKS = [",
+  "  ['widget/tools/z-layer-audit.mjs'],",
+  "  ['--check', 'lib/index.js'],",
+  "  ['grep', '-rn', 'TestBox', 'lib'],",
+  "  ['scripts/privacy-scan.mjs', '--strict'],",
+  "  ['widget/tools/ci-audit.mjs', '--no-pack'],",
+  "  ['--test', 'test/example.test.mjs'],",
+  "  ['scripts/install-simulation.mjs'],",
+  ']',
   '',
 ].join('\n')
 
@@ -70,6 +86,7 @@ const BASE = {
   'widget/assets/whale-widget.js': FRONT,
   '.github/workflows/ci.yml': WF,
   '.github/workflows/publish.yml': WF,
+  'scripts/ci-gate.mjs': GATE,
   'widget/tools/ci-audit.allowlist.json': JSON.stringify({
     allow: [{ key: 'widget/assets/whale-widget.js :: toast.innerHTML = msg', why: '样本用：已知动态入口' }],
   }, null, 2),
@@ -200,15 +217,101 @@ check('⑤ 字面量后面还有尾随代码 → 必须绿（.catch(function(){�
 })
 
 // --- ④ 门禁一致性 ------------------------------------------------------------
-check('④ publish.yml 被摘掉语法检查 → 必红', () => {
+check('④ publish.yml 不再调用统一门禁 → 必红', () => {
   const dir = writeFixture('c4-gate', {
-    '.github/workflows/publish.yml': WF.replace('      - run: node --check lib/index.js\n', ''),
+    '.github/workflows/publish.yml': WF.replace('      - run: node scripts/ci-gate.mjs\n', ''),
   })
-  red(dir, '4', '发布前门禁少一项')
+  red(dir, '4', '发布前门禁漏挂统一清单')
+})
+
+check('④ 统一门禁里语法检查被摘掉 → 必红', () => {
+  const dir = writeFixture('c4-syntax', {
+    'scripts/ci-gate.mjs': GATE.replace("  ['--check', 'lib/index.js'],\n", ''),
+  })
+  red(dir, '4', '门禁清单少一项')
 })
 
 check('④ 两份 workflow 覆盖一致 → 必须绿', () => {
   green(writeFixture('c4-ok'), '4', '两份 workflow 一致')
+})
+
+// --- 环境依赖扫描（审计脚本不得裸用本机时钟 / 工作目录） ----------------------
+// 为什么：CI 跑在 UTC、目录是干净 clone；本机是 UTC+8、还可能带生成物。
+// 断言里直接用 Date.now() / new Date() / process.cwd()，就会"本机绿、CI 红"。
+const ENV_PATTERNS = [
+  { name: 'Date.now()', re: /\bDate\.now\s*\(/g },
+  { name: 'new Date()', re: /\bnew\s+Date\s*\(/g },
+  { name: 'process.cwd()', re: /\bprocess\.cwd\s*\(/g },
+]
+// 允许清单：必须写明"为什么可以"，不要只写文件名。
+const ENV_ALLOW = new Map([
+  ['token-guard-audit.mjs', '用 localDayStart(Date.now()) + 12h 固定到本地日内 12:00，结果不随时钟漂移'],
+])
+
+/** 把注释与字符串内容替换成空格（保留换行，行号不变）：注释/文案里提到不算依赖。 */
+function maskNonCode(src) {
+  const out = src.split('')
+  let q = null
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]
+    if (q) {
+      if (c === '\\') { out[i] = ' '; if (i + 1 < src.length) out[i + 1] = ' '; i++; continue }
+      if (c === q) { out[i] = ' '; q = null; continue }
+      if (c !== '\n') out[i] = ' '
+      continue
+    }
+    if (c === "'" || c === '"' || c === '`') { out[i] = ' '; q = c; continue }
+    if (c === '/' && src[i + 1] === '/') {
+      while (i < src.length && src[i] !== '\n') { out[i] = ' '; i++ }
+      i--
+      continue
+    }
+    if (c === '/' && src[i + 1] === '*') {
+      out[i] = ' '; out[i + 1] = ' '; i += 2
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) {
+        if (src[i] !== '\n') out[i] = ' '
+        i++
+      }
+      if (i < src.length) { out[i] = ' '; out[i + 1] = ' '; i++ }
+    }
+  }
+  return out.join('')
+}
+
+function scanEnvDeps(src) {
+  const code = maskNonCode(src)
+  const hits = []
+  for (const p of ENV_PATTERNS) {
+    p.re.lastIndex = 0
+    let m
+    while ((m = p.re.exec(code)) !== null) {
+      hits.push({ name: p.name, line: code.slice(0, m.index).split('\n').length })
+    }
+  }
+  return hits
+}
+
+check('环境依赖：审计脚本不得裸用 Date.now()/new Date()/process.cwd()（时区/目录假红）', () => {
+  const files = fs.readdirSync(HERE).filter((f) => f.endsWith('.mjs')).sort()
+  const bad = []
+  for (const f of files) {
+    if (ENV_ALLOW.has(f)) continue
+    for (const h of scanEnvDeps(fs.readFileSync(path.join(HERE, f), 'utf8'))) {
+      bad.push(f + ':' + h.line + ' ' + h.name)
+    }
+  }
+  assert(bad.length === 0, '这些审计脚本依赖本机环境（CI 会红）：' + bad.join('；')
+    + '。请把时间/目录改成注入式固定输入；确有必要就登记到 ENV_ALLOW 并写明理由')
+  assert([...files].some((f) => ENV_ALLOW.has(f)), 'ENV_ALLOW 里的文件已不存在（清单腐烂）')
+})
+
+check('环境依赖扫描自证：写坏必红 / 注释与字符串不算 / 允许清单放行', () => {
+  assert(scanEnvDeps('const t = Date.now()\n').length === 1, 'Date.now() 没被扫出来')
+  assert(scanEnvDeps('const d = new Date()\n').length === 1, 'new Date() 没被扫出来')
+  assert(scanEnvDeps('const p = process.cwd()\n').length === 1, 'process.cwd() 没被扫出来')
+  assert(scanEnvDeps('// 这里提到 Date.now() 只是注释\nconst ok = 1\n').length === 0, '注释里的字样不应命中')
+  assert(scanEnvDeps('console.log("用 Date.now() 会漂")\n').length === 0, '字符串里的字样不应命中')
+  assert(ENV_ALLOW.has('token-guard-audit.mjs'), '允许清单丢了 token-guard-audit.mjs')
 })
 
 // --- 汇总 -------------------------------------------------------------------
