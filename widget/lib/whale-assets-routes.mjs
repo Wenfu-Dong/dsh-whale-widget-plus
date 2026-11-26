@@ -299,7 +299,7 @@ export function createWhaleAssetsRoutes(deps) {
   function petVideoMissingHint() {
     const why = petVideoMissingReason === 'dir-missing' ? '目录不存在' : (petVideoMissingReason === 'empty' ? '目录为空' : '目录不可读')
     return '桌宠动画素材未安装（assets/pet-video/ ' + why + '）：请重装最新版 dsh-Dfy（github:louke6572/surfcore，不要锁旧 commit），' +
-      '或手动把 106 段 .webm 放进 ' + petVideoDir + ' 后刷新页面。'
+      '或手动把 .webm 素材放进 ' + petVideoDir + ' 后刷新页面。'
   }
 
   const petVideoHandler = (req, res) => {

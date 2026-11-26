@@ -42,8 +42,8 @@ test('size.json：qqEnvOn 可保存，缺字段时沿用旧值', async () => {
   const { sizeHandler } = createWhaleMiscRoutes(deps);
   const put = await run(sizeHandler, 'PUT');
   assert.equal(put.status, 200);
-  // 最后一个位置参数就是 qqEnvOn
-  assert.equal(saved[saved.length - 1], false);
+  // 末尾两个位置参数：qqEnvOn、dragSpringOn
+  assert.equal(saved[saved.length - 2], false);
 
   // 不带 qqEnvOn 的 PUT（旧客户端 / 其它开关）不得把它洗回默认值
   const deps2 = {
@@ -54,7 +54,7 @@ test('size.json：qqEnvOn 可保存，缺字段时沿用旧值', async () => {
   };
   const { sizeHandler: handler2 } = createWhaleMiscRoutes(deps2);
   await run(handler2, 'PUT');
-  assert.equal(saved[saved.length - 1], false);
+  assert.equal(saved[saved.length - 2], false);
 });
 
 test('size.json：GET 原样回读 qqEnvOn', async () => {
@@ -69,4 +69,28 @@ test('size.json：GET 原样回读 qqEnvOn', async () => {
   assert.equal(got.status, 200);
   assert.equal(got.body.qqEnvOn, false);
   assert.equal(got.body.version, 'test');
+});
+
+// 拖拽弹簧跟手（对齐 dsh-pet physics.dragSpring，默认开）：缺口值沿用旧值，不回洗默认
+test('size.json：dragSpringOn 可保存，缺字段时沿用旧值', async () => {
+  let saved = null;
+  const deps = {
+    ...BASE_DEPS,
+    readSizeConfig: () => ({ scale: 1, dragSpringOn: true }),
+    writeSizeConfig: (...args) => { saved = args; return { ok: true } },
+    readBody: async () => JSON.stringify({ scale: 1, dragSpringOn: false }),
+  };
+  const { sizeHandler } = createWhaleMiscRoutes(deps);
+  await run(sizeHandler, 'PUT');
+  assert.equal(saved[saved.length - 1], false);
+
+  const deps2 = {
+    ...BASE_DEPS,
+    readSizeConfig: () => ({ scale: 1, dragSpringOn: false }),
+    writeSizeConfig: (...args) => { saved = args; return { ok: true } },
+    readBody: async () => JSON.stringify({ scale: 1 }),
+  };
+  const { sizeHandler: handler2 } = createWhaleMiscRoutes(deps2);
+  await run(handler2, 'PUT');
+  assert.equal(saved[saved.length - 1], false);
 });

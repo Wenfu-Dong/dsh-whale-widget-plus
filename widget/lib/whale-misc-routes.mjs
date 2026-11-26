@@ -195,7 +195,9 @@ export function createWhaleMiscRoutes(deps) {
           typeof parsed.vendorQuotaModel === 'string' ? parsed.vendorQuotaModel : (typeof old.vendorQuotaModel === 'string' ? old.vendorQuotaModel : ''),
           pickB(parsed.volcQuotaOn, old.volcQuotaOn, false),
           // issue #11：待机信封入口整体开关（默认开）
-          pickB(parsed.qqEnvOn, old.qqEnvOn, true)
+          pickB(parsed.qqEnvOn, old.qqEnvOn, true),
+          // 拖拽弹簧跟手（默认开；老配置里没有这个键 → 沿用默认开）
+          pickB(parsed.dragSpringOn, old.dragSpringOn, true)
         )
         res.writeHead(result.ok ? 200 : 500, JSON_HEADERS)
         // 配置刚变（可能刚关掉/打开 Codex 统计）→ 丢掉旧快照，让下一次请求立刻反映新设置

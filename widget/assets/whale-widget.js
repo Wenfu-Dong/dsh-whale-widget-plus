@@ -2829,6 +2829,21 @@ petIdleSel.addEventListener('change', function (e) {
 rowPetIdle.appendChild(menuLabel('待机'))
 rowPetIdle.appendChild(petIdleSel)
 petRowAct.push(rowPetIdle)
+// —— 睡觉：入睡 → 循环 → 叫醒（与 dsh-pet 的 sleep 套同语义）——
+var rowPetSleep = menuRow()
+rowPetSleep.appendChild(menuLabel('睡觉'))
+var petSleepBtn = document.createElement('button')
+petSleepBtn.type = 'button'
+petSleepBtn.className = 'dshwv-roleimport'
+petSleepBtn.style.flex = '1'
+petSleepBtn.textContent = '睡觉'
+petSleepBtn.title = '让桌宠睡一会儿（睡着时被戳只回一句拒绝台词）；再点一次叫醒'
+petSleepBtn.addEventListener('click', function (e) {
+  try { e.stopPropagation() } catch (err) {}
+  try { petSleepToggle() } catch (err) {}
+})
+rowPetSleep.appendChild(petSleepBtn)
+petRowAct.push(rowPetSleep)
 // —— 碎碎念 / 对话：宿主侧用当前对话的模型生成（人设在控制台里配）——
 var rowPetWhisper = menuRow()
 rowPetWhisper.appendChild(menuLabel('碎碎念'))
@@ -3292,6 +3307,8 @@ function saveUsageSettings(patch) {
 // Tailwind 的 preflight 不会污染宿主页面，样式也不再由手写 CSS 近似。
 var conFrame = null
 var conDoc = null
+// 新版控制台「动作与待机」里的睡觉/叫醒按钮（iframe 内元素，随 iframe 重建）
+var conSleepBtn = null
 var conReady = false
 var conSrcQ = null
 var conSrcA = null
@@ -4305,6 +4322,14 @@ function conBindExtras() {
     ex.bubble = doc.getElementById('con-bubble')
     // issue #11：待机信封入口（像素小鲸鱼 + ♥ PET / 🍤 FEED）开关，放在新版控制台「呈现与位置」
     ex.qqenv = doc.getElementById('con-qqenv')
+    // 拖拽弹簧跟手开关（仅桌宠形态有效）
+    ex.spring = doc.getElementById('con-spring')
+    // 睡觉 / 叫醒（动作与待机里的按钮）
+    conSleepBtn = doc.getElementById('con-sleep-btn')
+    conOn(conSleepBtn, 'click', function () {
+      try { petSleepToggle() } catch (err) {}
+      dshwvConSync()
+    })
     ex.pack = doc.getElementById('con-expr-pack')
     ex.exprItem = doc.getElementById('con-expr-item')
     ex.line = doc.getElementById('con-line')
@@ -4337,6 +4362,7 @@ function conBindExtras() {
     swCell(ex.blink, function () { try { exprSetBlink(!exprBlinkOn); saveConfig() } catch (err) {} })
     swCell(ex.bubble, function () { try { setBubbleOn(!(bubbleOn !== false)) } catch (err) {} })
     swCell(ex.qqenv, function () { try { setQqEnvOn(!qqEnvOn) } catch (err) {} })
+    swCell(ex.spring, function () { try { setDragSpringOn(!(dragSpringOn !== false)) } catch (err) {} })
 
     // 厂商额度（选装）：关掉时只显示 DeepSeek 余额；打开后气泡追加所选厂商模型的额度行
     function vqOpenAdd() {
@@ -4640,6 +4666,11 @@ function dshwvConSync() {
     }
     // 仅桌宠可见（共存时跟随「当前编辑的形态页」）
     if (conPillRefs.actCard) conPillRefs.actCard.style.display = petUiOn() ? '' : 'none'
+    // 睡觉入口只对桌宠有意义（小鲸鱼没有动画链）
+    try {
+      var sleepCellEl = conDoc && conDoc.getElementById('con-sleep-cell')
+      if (sleepCellEl) sleepCellEl.style.display = petUiOn() ? '' : 'none'
+    } catch (err) {}
     if (conPillRefs.aiCard) conPillRefs.aiCard.style.display = petUiOn() ? '' : 'none'
     if (conPillRefs.cloneCard) conPillRefs.cloneCard.style.display = petUiOn() ? '' : 'none'
     if (conPillRefs.labRoam) {
@@ -4652,6 +4683,12 @@ function dshwvConSync() {
         roamCard = (rp && rp.classList && rp.classList.contains('grid')) ? roamCard : rp
       }
       if (roamCard) roamCard.style.display = petUiOn() ? '' : 'none'
+    }
+    // 弹簧跟手只在桌宠形态有意义（小鲸鱼没有弹簧拖拽）
+    var springCell = conFindText('弹簧跟手')
+    if (springCell) {
+      var sc = springCell.closest('label') || springCell
+      sc.style.display = petUiOn() ? '' : 'none'
     }
     // 小鲸鱼页少了「屏幕漫游」这一个开关，让「隐藏菜单」占满剩余半行，避免网格留空洞
     if (conPillRefs.swHide) {
@@ -4677,6 +4714,9 @@ function dshwvConSync() {
       conSetSw(ex.blink, !!exprBlinkOn)
       conSetSw(ex.bubble, bubbleOn !== false)
       conSetSw(ex.qqenv, qqEnvOn !== false)
+      conSetSw(ex.spring, dragSpringOn !== false)
+      // 睡觉 / 叫醒按钮的文案与可用状态
+      try { petSleepSyncUi() } catch (err) {}
       try {
         var pbv = dshwPbLabelGet()
         if (ex.pbLabel) ex.pbLabel.value = pbv.mode || 'mini'
@@ -16931,6 +16971,8 @@ bubbleBox.addEventListener('click', function (e) {
     hideCostBubble()
     return
   }
+  // 桌宠说的话（碎碎念/对话/拒绝台词）：点一下直接戳破，不翻页也不续时
+  if (bubbleScene && bubbleScene.petSpeech) { hideBubble(); return }
   // 点击泡泡 = 跳到下一项；已是最后一项则关闭（点鲸鱼才是从队列开头开始）
   bubbleNext()
 })
@@ -22441,6 +22483,9 @@ var scrollGapPx = 17
 var menuBtnHide = false // 主菜单开关:隐藏挂件菜单按钮,改为右键小鲸鱼唤出菜单
 // issue #11：待机信封入口（像素小鲸鱼 + ♥ PET / 🍤 FEED）整体开关，默认显示。
 var qqEnvOn = true
+// 拖拽弹簧跟手（对齐 dsh-pet physics.dragSpring，默认开）：关掉后拖拽直接用指针落点，
+// 指针与宠物之间不再有"追赶"的延迟感。
+var dragSpringOn = true
 // 厂商额度（选装）：默认全关 —— 不配厂商模型、不看火山额度时，挂件只显示 DeepSeek 余额。
 // vendorQuotaOn = 气泡里自动追加「所选厂商模型」的额度行（渲染时注入，不改用户的泡泡配置）；
 // vendorQuotaModel = 选中的厂商模型 id（'' = 自动取第一个非内置模型）；
@@ -22512,7 +22557,7 @@ function configPayload() {
   //   宿主白名单、读侧合并、客户端回填都做了，唯独这里没发 ⇒ 宿主 pickB 走"沿用旧值(true)" ⇒ 永远存不住。
   //   与 v863 的 subagent.mute 是同一类"半截活"：新键必须走完 **四件套**
   //   ① 客户端 PUT 载荷 → ② 宿主写侧白名单 → ③ 宿主读侧合并 → ④ 客户端回填。
-  return JSON.stringify({ scale: state.scale, sound: soundOn, pressOn: pressOn !== false, vol: soundVol, soundSet: soundSet, usageMode: usageMode, peakMode: peakMode, bubbleOn: bubbleOn, turnCostOn: turnCostOn, turnCostCloseMs: turnCostCloseMs, scrollGapOn: scrollGapOn, scrollGapPx: scrollGapPx, menuBtnHide: menuBtnHide, codexStatsOn: codexStatsOn, exprPack: exprPack, exprOn: exprOn, blinkOn: exprBlinkOn, vendorQuotaOn: vendorQuotaOn, vendorQuotaModel: vendorQuotaModel, volcQuotaOn: volcQuotaOn, qqEnvOn: qqEnvOn })
+  return JSON.stringify({ scale: state.scale, sound: soundOn, pressOn: pressOn !== false, vol: soundVol, soundSet: soundSet, usageMode: usageMode, peakMode: peakMode, bubbleOn: bubbleOn, turnCostOn: turnCostOn, turnCostCloseMs: turnCostCloseMs, scrollGapOn: scrollGapOn, scrollGapPx: scrollGapPx, menuBtnHide: menuBtnHide, codexStatsOn: codexStatsOn, exprPack: exprPack, exprOn: exprOn, blinkOn: exprBlinkOn, vendorQuotaOn: vendorQuotaOn, vendorQuotaModel: vendorQuotaModel, volcQuotaOn: volcQuotaOn, qqEnvOn: qqEnvOn, dragSpringOn: dragSpringOn !== false })
 }
 // 真正的 PUT：读响应 → 失败（网络异常 / HTTP!=200 / {ok:false}）静默重试一次 → 仍失败才提示
 function configPut(payload, retried) {
@@ -22611,6 +22656,12 @@ function setQqEnvOn(v) {
   // 之前建过 dock：先挂回 body，再按当前未读状态展开
   try { if (petQqEnvDockEl && !dshwConnected(petQqEnvDockEl)) dshwBodyAppend(petQqEnvDockEl) } catch (err) {}
   try { petQqEnvShow() } catch (err) {}
+}
+function setDragSpringOn(v) {
+  dragSpringOn = v !== false
+  saveConfig()
+  // 关掉时立刻停掉正在跑的弹簧帧：否则松手前那一点残余速度还会把宠物往前带一下
+  if (!dragSpringOn) { try { petDragFollowStop() } catch (err) {} }
 }
 function setBubbleOn(v) {
   bubbleOn = !!v
@@ -23913,7 +23964,7 @@ function exprInit() {
   if (exprOn) exprLoadPacks(function () { exprRender(); exprRestartTimers() })
 }
 // ===== 桌宠形态（角色「桌宠」）=====
-// 把 dsh-pet（MIT，© PC2005-cloud）的**透明动画链**内置成一种角色形态，随包带 106 段 webm。
+// 把 dsh-pet（MIT，© PC2005-cloud）的**透明动画链**内置成一种角色形态，随包带 109 段 webm。
 // 只移植播放引擎（双缓冲交叉淡入 + 加权动画链 + 命中图取帧），不移植它的屏幕漫游 / 抛掷物理 /
 // 右键点播菜单 —— 本挂件的位置由拖拽吸附系统管理，养两套位置引擎必然互相打架。
 // 动画池与权重照抄 dsh-pet 的 assets/config.jsonc（idle 10 / turn 5 / move 5 / 分类 80）。
@@ -25225,11 +25276,17 @@ function petCloneDragStep(ts) {
   var c = d.c
   var dt = Math.min((ts - d.last) / 1000, 1 / 30)
   d.last = ts
-  d.vx = petSpringStep(d.vx, c.x, d.tx, dt)
-  d.vy = petSpringStep(d.vy, c.y, d.ty, dt)
   var vp = viewport()
-  c.x = clamp(c.x + d.vx * dt, 0, Math.max(0, vp.w - c.w))
-  c.y = clamp(c.y + d.vy * dt, 0, Math.max(0, vp.h - c.h))
+  if (dragSpringOn === false) {
+    // 弹簧跟手关闭：分身直接跟随指针落点
+    c.x = clamp(d.tx, 0, Math.max(0, vp.w - c.w))
+    c.y = clamp(d.ty, 0, Math.max(0, vp.h - c.h))
+  } else {
+    d.vx = petSpringStep(d.vx, c.x, d.tx, dt)
+    d.vy = petSpringStep(d.vy, c.y, d.ty, dt)
+    c.x = clamp(c.x + d.vx * dt, 0, Math.max(0, vp.w - c.w))
+    c.y = clamp(c.y + d.vy * dt, 0, Math.max(0, vp.h - c.h))
+  }
   petCloneApply(c)
   d.raf = requestAnimationFrame(petCloneDragStep)
 }
@@ -25872,11 +25929,17 @@ function petStandDragStep(ts) {
   if (!d) return
   var dt = Math.min((ts - d.last) / 1000, 1 / 30)
   d.last = ts
-  d.vx = petSpringStep(d.vx, petStandX, d.tx, dt)
-  d.vy = petSpringStep(d.vy, petStandY, d.ty, dt)
   var vp = viewport()
-  petStandX = clamp(petStandX + d.vx * dt, 0, Math.max(0, vp.w - (petStandFitW || 10)))
-  petStandY = clampWidgetTop(petStandY + d.vy * dt, Math.max(0, vp.h - (petStandFitH || 10)))
+  if (dragSpringOn === false) {
+    // 弹簧跟手关闭：独立桌宠实例直接跟随指针落点
+    petStandX = clamp(d.tx, 0, Math.max(0, vp.w - (petStandFitW || 10)))
+    petStandY = clampWidgetTop(d.ty, Math.max(0, vp.h - (petStandFitH || 10)))
+  } else {
+    d.vx = petSpringStep(d.vx, petStandX, d.tx, dt)
+    d.vy = petSpringStep(d.vy, petStandY, d.ty, dt)
+    petStandX = clamp(petStandX + d.vx * dt, 0, Math.max(0, vp.w - (petStandFitW || 10)))
+    petStandY = clampWidgetTop(petStandY + d.vy * dt, Math.max(0, vp.h - (petStandFitH || 10)))
+  }
   petStandApply()
   d.raf = requestAnimationFrame(petStandDragStep)
 }
@@ -26067,6 +26130,8 @@ function petSwitchTo(name, loop) {
 // 动画链：权重抽一类 → 抽一段 → 播完接着抽（idle 循环 + 定时器换段，与 dsh-pet 同观感）
 function petRunChain() {
   if (!petOn || !petAnims) return
+  // 睡觉期间不排任何随机动作：链回到这里就原地停住，等叫醒后再恢复
+  if (petSleeping()) return
   clearTimeout(petTimer)
   petTimer = 0
   if (Date.now() < petTempUntil) {
@@ -26139,6 +26204,23 @@ function petRunChain() {
 // 单次动画播完 → 回链（turn 播完翻转朝向）
 function petOnEnded() {
   if (!petOn) return
+  // 睡觉链：入睡段播完 → 循环段；醒来段播完 → 回随机链
+  if (petSleeping()) {
+    petSleepStopTimer()
+    if (petSleepState === 'start') { petSleepLoop(); return }
+    if (petSleepState === 'end') {
+      petSleepState = ''
+      petSleepSyncUi()
+      petTempUntil = 0
+      clearTimeout(petTimer)
+      petTimer = 0
+      petRunChain()
+      return
+    }
+    // 循环段正常不会 ended；万一触发就继续循环
+    petSleepLoop()
+    return
+  }
   petTempUntil = 0 // 临时插播播完即结束，链立刻恢复
   if (petCur === PET_POOLS.turn[0]) petFacingR = !petFacingR
   clearTimeout(petTimer)
@@ -26148,6 +26230,8 @@ function petOnEnded() {
 // 点击回应：临时插播一段（不打断链，播完自然回链）
 function petClickReact() {
   if (!petOn) return
+  // 睡着被戳：只回一句拒绝台词，不播点击回应、不打断睡觉
+  if (petSleeping()) { petSleepRefuse(); return }
   // 飞行中命中已触发积分：本次不再重复播普通点击回应（与 dsh-pet 一致）
   if (petScoreFired) { petScoreFired = false; return }
   // 点击回应：播当前「按压音效组」的按压音（选冰冰冰即冰冰冰，选 Q弹 即 Q弹）
@@ -26165,6 +26249,8 @@ function petClickReact() {
 // 拖拽：播放被拎起悬空反馈（循环），松手回链
 function petDragStart() {
   if (!petOn) return
+  // 睡着时允许拖动（物理是物理），但不切「被拎起」动画，免得把睡觉循环顶掉
+  if (petSleeping()) return
   if (!petHave(PET_POOLS.drag[0])) return
   petTempUntil = Date.now() + 60000
   var name = petPickNew(PET_POOLS.drag, petCur)
@@ -26177,9 +26263,82 @@ function petDragEnd(wasMoved) {
   petTempUntil = 0
   petRunChain()
 }
+// ===== 睡觉（与 dsh-pet 的 sleep 套同语义：开始 → 循环 → 起来）=====
+// 三段素材缺任何一段就不提供这个功能（菜单/控制台按钮隐藏），不半残地播。
+var PET_SLEEP = { start: '睡觉-开始', loop: '睡觉-循环', end: '睡觉-起来' }
+var petSleepState = '' // '' 清醒 | 'start' | 'loop' | 'end'
+var petSleepTimer = 0
+// 睡着期间被搭话时的拒绝台词（与 dsh-pet 的内置三句一致，只弹气泡、不播动画）
+var PET_SLEEP_REFUSE = [
+  '我在睡觉，别烦我……',
+  '唔……让我再睡一会儿。',
+  '呼……呼……（装作没听见）'
+]
+function petSleepReady() {
+  return petHave(PET_SLEEP.start) && petHave(PET_SLEEP.loop) && petHave(PET_SLEEP.end)
+}
+function petSleeping() { return petSleepState !== '' }
+function petSleepStopTimer() {
+  try { clearTimeout(petSleepTimer) } catch (err) {}
+  petSleepTimer = 0
+}
+function petSleepSyncUi() {
+  try {
+    var label = petSleeping() ? '叫醒' : '睡觉'
+    if (petSleepBtn) petSleepBtn.textContent = label
+    if (conSleepBtn) conSleepBtn.textContent = petSleeping() ? '叫醒桌宠' : '让桌宠睡觉'
+    // 素材没装全（或还在加载）时不摆一个点了没反应的入口
+    if (rowPetSleep) rowPetSleep.style.display = (!petAnims || petSleepReady()) ? '' : 'none'
+    if (conSleepBtn) conSleepBtn.disabled = !!petAnims && !petSleepReady()
+  } catch (err) {}
+}
+function petSleepRefuse() {
+  if (!petSleeping()) return
+  var t = PET_SLEEP_REFUSE[Math.floor(Math.random() * PET_SLEEP_REFUSE.length)]
+  try { petAiBubble(t, 40, 3500) } catch (err) {}
+}
+// 入睡段播完（或加载失败兜底）→ 切到循环段
+function petSleepLoop() {
+  if (!petSleeping()) return
+  petSleepState = 'loop'
+  try { petSwitchTo(PET_SLEEP.loop, true) } catch (err) {}
+  petSleepSyncUi()
+}
+function petSleepStart() {
+  if (!petOn || petSleeping() || !petSleepReady()) return
+  petSleepState = 'start'
+  petSleepStopTimer()
+  try { petStopRoam(); petStopThrow(); petDragFollowStop() } catch (err) {}
+  clearTimeout(petTimer)
+  petTimer = 0
+  petTempUntil = 0
+  try { petSwitchTo(PET_SLEEP.start, false) } catch (err) {}
+  // 素材加载失败 / ended 不触发时兜底进入循环，绝不把宠物钉在最后一帧
+  petSleepTimer = setTimeout(function () { if (petSleepState === 'start') petSleepLoop() }, 12000)
+  petSleepSyncUi()
+}
+function petSleepWake() {
+  if (!petSleeping()) return
+  petSleepStopTimer()
+  clearTimeout(petTimer)
+  petTimer = 0
+  if (!petOn) { petSleepState = ''; petSleepSyncUi(); return }
+  petSleepState = 'end'
+  try { petSwitchTo(PET_SLEEP.end, false) } catch (err) {}
+  petSleepTimer = setTimeout(function () {
+    if (petSleepState !== 'end') return
+    petSleepState = ''
+    petSleepSyncUi()
+    petRunChain()
+  }, 12000)
+  petSleepSyncUi()
+}
+function petSleepToggle() { if (petSleeping()) petSleepWake(); else petSleepStart() }
 // 工作状态联动（复用挂件已有的轮询点：等待提问/授权 → 踱步；一轮结束 → 雀跃）
 function petWork(kind) {
   if (!petOn || !petAnims) return
+  // 睡觉期间不响应工作状态联动（完成/等待都等叫醒后再说）
+  if (petSleeping()) return
   var name = PET_POOLS.work[kind]
   if (!name || !petHave(name)) return
   clearTimeout(petTimer)
@@ -26196,6 +26355,8 @@ function petCloseActions() {
 }
 function petPlayNamed(name) {
   if (!petOn || !petHave(name)) return
+  // 睡着时点播动作 = 拒绝（与 dsh-pet 同语义：睡觉期间不执行动画请求）
+  if (petSleeping()) { petSleepRefuse(); return }
   petCloseActions()
   // 点播一次：播完由 ended 回链；万一这段素材不触发 ended/加载失败，用定时器兜底回链，
   // 绝不把桌宠永久钉在这一段上（dsh-pet 的 playOnce 同语义）。
@@ -26344,6 +26505,8 @@ function petAiBubble(text, limit, ttlMs) {
     sceneOpen('custom', function () {
       bubbleRenderModules(bubbleVendorMods([{ type: 'text', text: body }]))
     }, ttlMs === undefined ? 8000 : (Number(ttlMs) || 0))
+    // 标记为「桌宠说的话」：点一下气泡直接戳破（不参与手动点击队列的翻页逻辑）
+    try { if (bubbleScene) bubbleScene.petSpeech = true } catch (err) {}
   } catch (err) {}
 }
 // 播一段「碎碎念」动画（点播一次，播完回全局随机链）
@@ -26381,6 +26544,8 @@ function petWhisperSchedule() {
   }, min * 60000)
 }
 function petWhisperNow(manual) {
+  // 睡着时碎碎念/对话一律暂停：手动点「说一句」回一句拒绝台词，自动的不吵醒它
+  if (petSleeping()) { if (manual) petSleepRefuse(); return }
   try {
     petAiLoad(function () {
       if (petAiBusy) return
@@ -28232,6 +28397,8 @@ function petLoadAnims(cb) {
       petAnimsMissingDir = (d && typeof d.dir === 'string') ? d.dir : ''
       try { petFillIdleSelect() } catch (err) {}
       try { petFillCategorySelects() } catch (err) {}
+      // 睡觉素材是否齐（缺就不显示「睡觉」入口）
+      try { petSleepSyncUi() } catch (err) {}
       if (!map[PET_IDLE]) {
         var msg = '[dsh-whale] 桌宠素材缺失：assets/pet-video/ 里没有「' + PET_IDLE + '」'
         if (petAnimsMissingHint) msg += '\n' + petAnimsMissingHint
@@ -28342,7 +28509,7 @@ function petEnable(byUser) {
     if (!ok) {
       // issue #6：不要只弹「已回退默认角色」——要告诉用户缺什么、放哪里、怎么修。
       var tip = petAnimsMissingHint || ('桌宠素材缺失：assets/pet-video/ 不存在或为空。' +
-        '请重装最新版 dsh-Dfy（插件市场更新，或 github:louke6572/dsh-Dfy），或把 106 段 .webm 放进 ' +
+        '请重装最新版 dsh-Dfy（插件市场更新，或 github:louke6572/dsh-Dfy），或把 .webm 素材放进 ' +
         (petAnimsMissingDir || '插件目录/assets/pet-video/') + ' 后刷新页面。')
       try { dshwvToast(tip) } catch (err) {}
       return
@@ -28435,6 +28602,10 @@ function petDisable() {
   petTimer = 0
   petTempUntil = 0
   petWaitKey = ''
+  // 退出桌宠形态时清掉睡觉状态：下次进来是清醒的，不会一启用就躺着
+  petSleepState = ''
+  petSleepStopTimer()
+  try { petSleepSyncUi() } catch (err) {}
   petNoMirror = false
   // 物理/漫游/分身全部停掉：分身只在桌宠形态存在，退出时移除 DOM（数量偏好保留在 localStorage）
   try { petStopRoam(); petStopThrow(); petDragFollowStop() } catch (err) {}
@@ -28794,7 +28965,7 @@ function renderRolePanel() {
       petNameEl.textContent = '桌宠（动画）'
       petNameWrap.appendChild(petNameEl)
       petItem.appendChild(petNameWrap)
-      petItem.title = '内置桌宠形态：106 段透明动画（待机/玩耍/吃东西/时节/工作状态），素材源自 dsh-pet（MIT）'
+      petItem.title = '内置桌宠形态：109 段透明动画（待机/玩耍/吃东西/时节/工作状态），素材源自 dsh-pet（MIT）'
       petItem.addEventListener('click', function (e) {
         e.stopPropagation()
         closeRolePanel()
@@ -30465,7 +30636,7 @@ function onDocPointerDown(e) {
       petDragFollowStop()
       petDragTrail = []
       petDragTarget = { x: state.left, y: state.top }
-      petDragFollowStart()
+      if (dragSpringOn !== false) petDragFollowStart()
     } catch (err) {}
   }
   setWidgetCursor('grabbing')
@@ -30487,6 +30658,12 @@ function onDocPointerMove(e) {
     petDragTarget = {
       x: clamp(drag.origLeft + dx, 0, Math.max(0, drag.vp.w - drag.w)),
       y: clampWidgetTop(drag.origTop + dy, Math.max(0, drag.vp.h - drag.h))
+    }
+    // 弹簧跟手关闭：不做追赶，直接落到指针位置（保留甩抛用的轨迹采样）
+    if (dragSpringOn === false) {
+      state.left = petDragTarget.x
+      state.top = petDragTarget.y
+      petPosApply()
     }
     petTrailPush(petDragTrail, e)
     return
@@ -31133,6 +31310,8 @@ function sizeCfgApply(d) {
       if (qqEnvToggle) qqEnvToggle.checked = qqEnvOn
       if (!qqEnvOn) { try { petQqEnvDetachFromBody() } catch (err) {} }
     }
+    // 拖拽弹簧跟手（老配置里没有这个键 → 保持默认「开」）
+    if (d && typeof d.dragSpringOn === 'boolean') dragSpringOn = d.dragSpringOn
     // 厂商额度（选装）：三个新键，老配置里没有 → 保持默认「全关」
     if (d && typeof d.vendorQuotaOn === 'boolean') vendorQuotaOn = d.vendorQuotaOn
     if (d && typeof d.vendorQuotaModel === 'string') vendorQuotaModel = d.vendorQuotaModel

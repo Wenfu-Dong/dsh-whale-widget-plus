@@ -3407,6 +3407,9 @@ export default {
               // 待机信封入口（像素小鲸鱼 + ♥ PET / 🍤 FEED）：issue #11，默认开；
               // 关掉后整个 .dshwv-qqenv-dock 不渲染（不接 QQ 的用户常被它误点）。
               qqEnvOn: parsed.qqEnvOn !== false,
+              // 拖拽弹簧跟手（对齐 dsh-pet physics.dragSpring，默认开）：关掉后拖拽直接用指针
+              // 位置落点，不再被过阻尼弹簧"拖着走"，适合觉得跟手有延迟的用户。
+              dragSpringOn: parsed.dragSpringOn !== false,
               // 厂商额度（选装）：默认全关（老配置里没这三键 ⇒ 不显示厂商额度、不请求火山额度）
               vendorQuotaOn: parsed.vendorQuotaOn === true,
               vendorQuotaModel: typeof parsed.vendorQuotaModel === 'string' ? parsed.vendorQuotaModel : '',
@@ -3418,7 +3421,7 @@ export default {
       return null
     }
 
-    function writeSizeConfig(scale, sound, vol, soundSet, usageMode, peakMode, bubbleOn, pressOnArg, turnCostOn, turnCostCloseMs, scrollGapOn, scrollGapPx, menuBtnHide, codexStatsOnArg, exprPackArg, exprOnArg, blinkOnArg, vendorQuotaOnArg, vendorQuotaModelArg, volcQuotaOnArg, qqEnvOnArg) {
+    function writeSizeConfig(scale, sound, vol, soundSet, usageMode, peakMode, bubbleOn, pressOnArg, turnCostOn, turnCostCloseMs, scrollGapOn, scrollGapPx, menuBtnHide, codexStatsOnArg, exprPackArg, exprOnArg, blinkOnArg, vendorQuotaOnArg, vendorQuotaModelArg, volcQuotaOnArg, qqEnvOnArg, dragSpringOnArg) {
       const um = normalizeUsageMode(usageMode)
       const pm = peakMode === 'liangwen' || peakMode === 'qiangqiang' ? peakMode : 'default'
       const bo = bubbleOn !== false
@@ -3438,6 +3441,8 @@ export default {
       const vlo = volcQuotaOnArg === true
       // issue #11：待机信封入口（默认显示；关掉后整个 dock 不渲染）
       const qeo = qqEnvOnArg !== false
+      // 拖拽弹簧跟手（默认开，对齐 dsh-pet physics.dragSpring）
+      const dso = dragSpringOnArg !== false
       const body = JSON.stringify({
         scale: scale,
         sound: sound !== false,
@@ -3460,6 +3465,7 @@ export default {
         vendorQuotaModel: vqm,
         volcQuotaOn: vlo,
         qqEnvOn: qeo,
+        dragSpringOn: dso,
         updatedAt: new Date().toISOString(),
       })
       let lastSizeErr = null
@@ -3489,6 +3495,7 @@ export default {
             vendorQuotaModel: vqm,
             volcQuotaOn: vlo,
             qqEnvOn: qeo,
+            dragSpringOn: dso,
           }
         } catch (err) { lastSizeErr = err }
       }

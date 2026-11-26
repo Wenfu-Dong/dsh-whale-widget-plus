@@ -324,6 +324,12 @@ main>div.dshwv-body>:not([hidden]){flex:0 0 auto}
 <div class="w-2 h-2 bg-white rounded-full shadow-switch-thumb"></div>
 </div>
 </label>
+<label class="py-1 px-2 rounded-lg bg-white border border-slate-200/70 flex items-center justify-between cursor-pointer hover:border-slate-300 transition-all shadow-tactile-card group active:scale-[0.98]" id="con-cell-spring" title="拖拽弹簧跟手：开启时宠物略带延迟地追赶指针；关闭后完全贴着指针走">
+<span class="text-[9.5px] font-medium text-slate-700 group-hover:text-slate-900 leading-none truncate">弹簧跟手</span>
+<div class="w-5 h-3 bg-slate-300 rounded-full relative p-0.5 flex items-center shadow-inner flex-shrink-0 ml-1.5" id="con-spring">
+<div class="w-2 h-2 bg-white rounded-full shadow-switch-thumb"></div>
+</div>
+</label>
 </div>
 <div class="py-1 px-2 rounded-lg bg-white border border-slate-200/70 flex items-center space-x-2 shadow-tactile-card hidden" id="con-gap-wrap">
 <span class="text-[9px] text-slate-400 flex-shrink-0">宽度</span>
@@ -426,14 +432,18 @@ main>div.dshwv-body>:not([hidden]){flex:0 0 auto}
 </div>
 </div>
 </div>
+<!-- 睡觉：放在首页「呈现与位置」卡片底部，不用展开折叠区；小鲸鱼页隐藏 -->
+<div class="pt-0.5" id="con-sleep-cell">
+<button class="w-full py-1 px-2 rounded-lg bg-white border border-slate-200/70 hover:border-slate-300 text-[9.5px] font-semibold text-slate-700 shadow-tactile-card active:scale-[0.98] transition-all" id="con-sleep-btn" title="让桌宠睡一会儿：入睡 → 循环，睡着时被戳只回一句拒绝台词；再点一次叫醒" type="button">让桌宠睡觉</button>
+</div>
 </section>
 <!-- 2. 动作与待机（仅桌宠） -->
 <section class="p-2 rounded-xl bg-slate-50/60 border border-slate-200/70 shadow-tactile-card space-y-1.5 transition-all duration-200" id="action-standby-card" style="order:4">
 <button class="w-full flex items-center justify-between cursor-pointer text-left focus:outline-none" id="action-accordion-header" type="button">
 <span class="text-[10px] font-bold text-slate-800 tracking-tight">动作与待机</span>
-<span class="material-symbols-outlined text-[13px] text-slate-400 transition-transform duration-200 -rotate-90" id="action-chevron">expand_more</span>
+<span class="material-symbols-outlined text-[13px] text-slate-400 transition-transform duration-200" id="action-chevron">expand_more</span>
 </button>
-<div class="space-y-1.5 pt-0.5 hidden" id="action-accordion-body">
+<div class="space-y-1.5 pt-0.5" id="action-accordion-body">
 <div class="custom-dropdown-wrap relative py-1 px-2 rounded-lg bg-white/80 border border-slate-200/70 flex items-center justify-between min-w-0">
 <span class="text-[9px] font-medium text-slate-500 flex-shrink-0 mr-1.5 pointer-events-none">动作与分类</span>
 <div class="flex items-center justify-end min-w-0 flex-1 pointer-events-none">

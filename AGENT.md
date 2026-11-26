@@ -172,7 +172,7 @@ curl -s -o NUL -w "%{http_code}" http://127.0.0.1:3080/dsh-whale/widget.js
 dsh-Dfy 已安装。
 - 路线：<只挂件/桌宠 / 内置版 QQ / AstrBot 版>
 - 安装目录：<目录>
-- 版本：0.7.10
+- 版本：0.7.11
 - DSH profile：<profile>
 - SnowLuma：<已检测到 / 未安装（需你自备安装包） / 不接 QQ>
 - AstrBot：<未使用 / 由你自行安装到独立目录，已帮你配置>

@@ -1,8 +1,8 @@
 # dsh-Dfy
 
-> DeepSeek Harness（DSH）的桌宠与挂件套件 · `v0.7.10`
+> DeepSeek Harness（DSH）的桌宠与挂件套件 · `v0.7.11`
 
-小鲸鱼余额挂件 + 桌宠（106 段透明动画）+ QQ 消息卡，QQ / B站 / 双向脱敏记忆由包内自带的 SurfCore 提供。
+小鲸鱼余额挂件 + 桌宠（109 段透明动画）+ QQ 消息卡，QQ / B站 / 双向脱敏记忆由包内自带的 SurfCore 提供。
 
 > English: an all-in-one **DeepSeek Harness (DSH) plugin** — balance whale widget, transparent desktop pet,
 > QQ chat through AstrBot (plugins) with every conversation mirrored into its own DSH session, Bilibili dynamics/comments, and local redacted memory.
@@ -90,7 +90,7 @@
 | 余额与用量 | 60 秒刷新；今日已用按余额差 + 会话事件记账；每轮真实 usage 换算金额；近 7 天与按日明细 |
 | 峰谷 | 状态与倒计时常驻角色左下角；节假日按谷价 |
 | 小鲸鱼 | 5 套表情（133 张）、情绪 / 眨眼 / 卖萌、泡泡编辑器、音效 |
-| 桌宠 | 106 段动画、13 个动作分类；Q 弹、弹簧拖拽、甩抛、屏幕漫游、分身、双击弹弓 |
+| 桌宠 | 109 段动画（含睡觉链）、13 个动作分类；Q 弹、弹簧拖拽（可关）、甩抛、屏幕漫游、分身、双击弹弓 |
 | 形态 | 小鲸鱼 / 桌宠 / 共存 三种互斥；共存 = 两只同时显示，各自独立位置与大小 |
 | QQ | **接入二选一**：内置版（默认，SnowLuma → dsh-Dfy 内置桥 → DSH）/ AstrBot 版（SnowLuma → AstrBot 插件层 → dsh_bridge → DSH）；每段对话在 DSH 里独立成会话（可切模型 / 看思考 / 看上下文）；信封角标 + 消息 / 记录 / 写消息三视图 |
 | B站 | 扫码登录、动态 / 评论互动、鱼群保护、昼夜作息 |
@@ -606,7 +606,7 @@ scripts/   安装、更新、自检、发布
 - **[月匠 MeteorNOX](https://github.com/MeteorNOX)**：官方挂件
   [`DeepSeek-Balance-Whale-Widget`](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget)，
   余额 / 记账 / 峰谷 / 泡泡 / 音效与安全边界源自该项目。
-- **[PC2005-cloud](https://github.com/PC2005-cloud)**：`dsh-pet`（MIT），106 段动画、动作链与桌宠物理交互源自该项目。
+- **[PC2005-cloud](https://github.com/PC2005-cloud)**：`dsh-pet`（MIT），109 段动画、动作链与桌宠物理交互源自该项目。
 - **SurfCore**（[Mieksido/surfcore](https://github.com/Mieksido/surfcore)）：QQ / B站桥接、双向脱敏记忆、身份对齐。
 - **SnowLuma**：第三方 QQ 运行时，负责 QQ 登录与收发消息；专有软件，不随本仓库分发。仓库已转私有，插件不再提供自动下载，安装包需自行准备。
 - **DSH**：插件宿主，提供 bundle / patch / client / MCP。
