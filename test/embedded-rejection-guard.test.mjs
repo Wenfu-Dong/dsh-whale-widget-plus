@@ -13,7 +13,8 @@ test('isOwnStack 识别本包堆栈（反斜杠路径）', () => {
   assert.equal(isOwnStack(stack, ROOT), true);
 });
 
-test('isOwnStack 识别本包堆栈（file URL，Windows 盘符大小写不同）', () => {
+// 盘符大小写不敏感是 Windows 语义；Linux 文件系统区分大小写，这条只能在 Windows 上验。
+test('isOwnStack 识别本包堆栈（file URL，Windows 盘符大小写不同）', { skip: process.platform !== 'win32' }, () => {
   const stack = 'Error: boom\n    at run (file:///' + SLASH_ROOT.toLowerCase() + '/backend/lib/index.js:9:1)';
   assert.equal(isOwnStack(stack, ROOT), true);
 });

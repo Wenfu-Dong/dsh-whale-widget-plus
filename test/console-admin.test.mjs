@@ -174,7 +174,8 @@ test('GET/POST /api/security：reharden 走依赖，interceptNotify 写盘', asy
   const get = makeIo('GET', '/api/security');
   await routes.handleSecurity(get.req, {}, get.url, get.sendJson, get.readBody);
   assert.equal(get.result().payload.stateDir.hardened, false);
-  assert.match(get.result().payload.stateDir.manualCommand, /icacls/);
+  // 手动加固命令随平台走：Windows 是 icacls，POSIX 是 chmod。
+  assert.match(get.result().payload.stateDir.manualCommand, process.platform === 'win32' ? /icacls/ : /chmod/);
 
   const reharden = makeIo('POST', '/api/security', { rehardenStateDir: true });
   await routes.handleSecurity(reharden.req, {}, reharden.url, reharden.sendJson, reharden.readBody);
